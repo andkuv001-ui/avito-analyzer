@@ -27,8 +27,4 @@ def get_model(override: str | None = None) -> str:
 
 
 def mask_key(key: str | None) -> str:
-    if not key:
-        return "не задан"
-    if len(key) <= 8:
-        return "задан"
-    return f"задан ({key[:3]}…{key[-4:]})"
+    return "задан" if key else "не задан"
