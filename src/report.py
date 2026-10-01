@@ -85,6 +85,7 @@ def assemble_report(stage_b_md: str, demand_map_md: str, niche: str, region: str
                     total: int, model: str, generated_at: datetime | None = None) -> str:
     generated_at = generated_at or datetime.now()
     body = _insert_demand_map(stage_b_md.strip(), demand_map_md)
+    body = re.sub(r"^#\s+Аналитический отчёт[^\n]*\n+", "", body, count=1)
     parts = ["# Аналитический отчёт по выдаче Avito", "", 
              meta_block(niche, region, total, model, generated_at), body, ""]
     return "\n".join(parts)

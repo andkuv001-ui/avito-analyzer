@@ -175,14 +175,18 @@ if run or (result_key in results):
                     progress.progress(0.15 + 0.4 * done / max(total, 1),
                                       text=f"Стадия A: чанк {done}/{total}")
 
-                classifications = classify_listings(
+                classifications, stage_a_error = classify_listings(
                     listings, model=model_override, progress=stage_a_progress
                 )
                 if classifications is not None:
                     stage_a_cache[stage_key] = classifications
-                progress.progress(0.55, text="Стадия A завершена"
-                                 if classifications is not None else
-                                 "Стадия A — JSON не получен, карта спроса с [НЕТ ДАННЫХ]")
+                    progress.progress(0.55, text="Стадия A завершена")
+                else:
+                    progress.progress(0.55, text="Стадия A — JSON не получен, карта спроса с [НЕТ ДАННЫХ]")
+                    status.warning(
+                        f"Стадия A не вернула валидный JSON: {stage_a_error}. "
+                        "Карта спроса будет с [НЕТ ДАННЫХ], отчёт продолжит строиться."
+                    )
 
             demand_map_md = build_demand_map_table(classifications, listings)
             digest_text = build_digest(listings, summary, demand_map_md,

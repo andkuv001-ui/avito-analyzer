@@ -100,6 +100,11 @@ def _extract_json(text: str):
 
 
 def validate_stage_a(parsed, expected_ns: set[int]) -> dict[int, dict]:
+    if isinstance(parsed, dict):
+        for value in parsed.values():
+            if isinstance(value, list):
+                parsed = value
+                break
     if not isinstance(parsed, list):
         raise LLMError("Стадия A: ответ не массив.")
     result: dict[int, dict] = {}
@@ -107,20 +112,25 @@ def validate_stage_a(parsed, expected_ns: set[int]) -> dict[int, dict]:
         if not isinstance(item, dict):
             raise LLMError("Стадия A: элемент не объект.")
         n = item.get("n")
+        if isinstance(n, str) and n.strip().isdigit():
+            n = int(n.strip())
         if not isinstance(n, int) or n not in expected_ns:
             raise LLMError("Стадия A: некорректный номер объявления.")
         clusters = item.get("clusters")
         if not isinstance(clusters, list):
             raise LLMError("Стадия A: нет clusters.")
+        normalized = []
         for cluster in clusters:
-            if (not isinstance(cluster, dict)
-                    or cluster.get("kind") not in ALLOWED_KINDS
-                    or not isinstance(cluster.get("tag"), str)
-                    or not cluster["tag"].strip()):
+            if not isinstance(cluster, dict):
                 raise LLMError("Стадия A: некорректный кластер.")
+            kind = str(cluster.get("kind") or "").strip().lower().rstrip("*")
+            tag = str(cluster.get("tag") or "").strip()
+            if kind not in ALLOWED_KINDS or not tag:
+                raise LLMError("Стадия A: некорректный кластер.")
+            normalized.append({"kind": kind, "tag": tag})
         result[n] = {
             "b2b": item.get("b2b") if item.get("b2b") in ("B2C", "B2B", "B2C+B2B") else "B2C",
-            "clusters": [{"kind": c["kind"], "tag": c["tag"].strip()} for c in clusters],
+            "clusters": normalized,
             "queries": [str(q) for q in item.get("queries") or []][:5],
             "usp": item.get("usp"),
             "scenario": item.get("scenario"),
@@ -145,20 +155,25 @@ def _stage_a_chunk_payload(chunk: list[dict]) -> str:
 
 
 def classify_listings(listings: list[dict], model: str | None = None,
-                      progress: Callable[[int, int], None] | None = None) -> dict[int, dict] | None:
-    """Стадия A: классификация каждого объявления. None — если JSON не удалось получить (fallback)."""
+                      progress: Callable[[int, int], None] | None = None
+                      ) -> tuple[dict[int, dict] | None, str | None]:
+    """Стадия A: классификация каждого объявления.
+
+    Возвращает (результат, None) или (None, причина) — фолбэк для карты спроса.
+    """
     if not listings:
-        return {}
+        return {}, None
     resolved_model = config.get_model(model)
     client = _client()
     expected_ns = {r["n"] for r in listings}
     results: dict[int, dict] = {}
+    first_error: str | None = None
 
     chunks = [listings[i:i + CHUNK_SIZE] for i in range(0, len(listings), CHUNK_SIZE)]
     for ci, chunk in enumerate(chunks):
         chunk_ns = {r["n"] for r in chunk}
         payload = _stage_a_chunk_payload(chunk)
-        last_error: Exception | None = None
+        last_error: LLMError | None = None
         for attempt in (1, 2):
             try:
                 raw = _chat(client, resolved_model, STAGE_A_SYSTEM, payload, temperature=0.0)
@@ -168,21 +183,22 @@ def classify_listings(listings: list[dict], model: str | None = None,
                 break
             except LLMError as exc:
                 last_error = exc
-                payload_retry = payload + (
+                if first_error is None:
+                    first_error = str(exc)
+                payload = payload + (
                     "\n\nПРЕДЫДУЩИЙ ОТВЕТ БЫЛ НЕВАЛИДЕН ("
-                    f"{exc}). Верни строго валидный JSON-массив для всех объявлений chunk."
+                    f"{exc}). Верни строго валидный JSON-массив для всех объявлений."
                 )
-                payload = payload_retry
         if last_error is not None:
             if progress:
                 progress(ci + 1, len(chunks))
-            return None
+            return None, first_error
         if progress:
             progress(ci + 1, len(chunks))
 
     if set(results) != expected_ns:
-        return None
-    return results
+        return None, first_error or "Стадия A: неполный результат."
+    return results, None
 
 
 def build_system_prompt(niche: str, region: str, prompt_template: str) -> str:
