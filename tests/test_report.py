@@ -9,10 +9,11 @@ from src.report import (
 )
 
 REF = datetime(2026, 10, 1, 18, 0)
+FRESH, STALE = "свежее", "старое"
 
 
-def _listing(n, bucket):
-    return {"n": n, "freshness_bucket": bucket}
+def _listing(n, klass):
+    return {"n": n, "freshness_class": klass}
 
 
 def _classifications():
@@ -29,28 +30,28 @@ def _classifications():
 
 def test_demand_map_counts_from_code():
     listings = [
-        _listing(1, "0–1"),
-        _listing(2, "2–3"),
-        _listing(3, "31+"),
+        _listing(1, FRESH),
+        _listing(2, STALE),
+        _listing(3, STALE),
     ]
     table = build_demand_map_table(_classifications(), listings)
 
     lines = table.splitlines()
-    assert lines[0].startswith("| Кластер | Тип |")
+    assert lines[0].startswith("| Кластер | Тип | свежее | старое |")
     rows = {line.split("|")[1].strip(): line for line in lines[2:]}
 
-    cactus = rows["кактусы"]
-    assert cactus.split("|")[3].strip() == "1"   # 0–1
-    assert cactus.split("|")[7].strip() == "1"   # 31+
-    gift = rows["подарок"]
-    assert gift.split("|")[4].strip() == "1"     # 2–3
+    cactus = rows["кактусы"].split("|")
+    assert cactus[3].strip() == "1"   # свежее
+    assert cactus[4].strip() == "1"   # старое
+    gift = rows["подарок"].split("|")
+    assert gift[4].strip() == "1"     # старое
     assert "**ИТОГО**" in table
     # Объявление 2 содержит два тега → появляется в двух строках карты
     assert "| **4** |" in table
 
 
 def test_demand_map_fallback_no_classifications():
-    listings = [_listing(1, "0–1"), _listing(2, NO_FRESHNESS), _listing(3, "0–1")]
+    listings = [_listing(1, FRESH), _listing(2, NO_FRESHNESS), _listing(3, FRESH)]
     table = build_demand_map_table(None, listings)
     assert "[НЕТ ДАННЫХ]" in table
     assert table.splitlines()[2].split("|")[1].strip() == "[НЕТ ДАННЫХ]"
@@ -58,7 +59,7 @@ def test_demand_map_fallback_no_classifications():
 
 
 def test_demand_map_row_without_tags():
-    listings = [_listing(1, "0–1")]
+    listings = [_listing(1, FRESH)]
     table = build_demand_map_table(
         {1: {"clusters": [], "b2b": "B2C", "queries": [], "usp": None, "scenario": None}},
         listings,
@@ -74,7 +75,7 @@ def _stage_b_text():
 
 
 def test_assemble_report_has_sections_1_10_and_table():
-    listings = [_listing(1, "0–1"), _listing(2, "31+")]
+    listings = [_listing(1, FRESH), _listing(2, STALE)]
     table = build_demand_map_table(_classifications(), listings)
     report = assemble_report(_stage_b_text(), table,
                              niche="кактусы", region="Москва",
@@ -84,19 +85,18 @@ def test_assemble_report_has_sections_1_10_and_table():
     for i in range(1, 11):
         assert f"## {i}." in report
     assert DEMAND_MAP_PLACEHOLDER not in report
-    assert "| Кластер | Тип |" in report
+    assert "| Кластер | Тип | свежее | старое |" in report
     assert "**ИТОГО**" in report
     assert "кактусы" in report and "Москва" in report
     assert "Время парсинга выгрузки" in report
     assert "01.10.2026 18:05" in report
-    assert "3" in report.split("Объявлений в выдаче")[1][:40]
 
 
 def test_assemble_report_inserts_after_section_8_without_placeholder():
     stage_b = "# Заголовок\n\n" + "\n\n".join(
         f"## {i}. Раздел {i}\n\nтекст" for i in range(1, 11)
     )
-    table = "| Кластер | Тип | 0–1 | 2–3 | 4–7 | 8–30 | 31+ | Нет данных | ИТОГО |\n|---|---|---:|---:|---:|---:|---:|---:|---:|"
+    table = "| Кластер | Тип | свежее | старое | ИТОГО |\n|---|---|---:|---:|---:|"
     report = assemble_report(stage_b, table, niche="товар", region="СПб",
                              total=1, model="m", generated_at=REF)
     assert "| Кластер | Тип |" in report

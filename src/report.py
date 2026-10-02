@@ -6,41 +6,40 @@ import re
 from datetime import datetime
 
 from .dates import NO_FRESHNESS
-from .metrics import BUCKET_LABELS, FRESHNESS_BUCKETS
+from .metrics import FRESHNESS_CLASSES
 
 DEMAND_MAP_PLACEHOLDER = "[ТАБЛИЦА КАРТЫ СПРОСА]"
 NO_DATA_LABEL = "[НЕТ ДАННЫХ]"
 
 
 def build_demand_map_table(classifications: dict[int, dict] | None, listings: list[dict]) -> str:
-    """Точная карта спроса: строки — кластеры из стадии A, столбцы — бакеты свежести из кода."""
-    columns = BUCKET_LABELS + [NO_FRESHNESS]
+    """Точная карта спроса: строки — кластеры из стадии A, столбцы — свежее/старое из кода."""
+    columns = FRESHNESS_CLASSES + [NO_FRESHNESS]
     counts: dict[tuple[str, str], int] = {}
     row_totals: dict[tuple[str, str], int] = {}
 
-    def bump(row_key: tuple[str, str], bucket: str):
-        counts[(row_key, bucket)] = counts.get((row_key, bucket), 0) + 1
+    def bump(row_key: tuple[str, str], klass: str):
+        counts[(row_key, klass)] = counts.get((row_key, klass), 0) + 1
         row_totals[row_key] = row_totals.get(row_key, 0) + 1
 
     if classifications is None:
         for record in listings:
-            bump((NO_DATA_LABEL, ""), record.get("freshness_bucket") or NO_FRESHNESS)
+            bump((NO_DATA_LABEL, ""), record.get("freshness_class") or NO_FRESHNESS)
     else:
         for record in listings:
-            bucket = record.get("freshness_bucket") or NO_FRESHNESS
+            klass = record.get("freshness_class") or NO_FRESHNESS
             clusters = (classifications.get(record["n"]) or {}).get("clusters") or []
             if not clusters:
-                bump(("(без тегов)", ""), bucket)
+                bump(("(без тегов)", ""), klass)
                 continue
             for cluster in clusters:
-                bump((cluster["tag"].strip(), cluster["kind"]), bucket)
+                bump((cluster["tag"].strip(), cluster["kind"]), klass)
 
     if not counts:
         return f"*{NO_DATA_LABEL}*"
 
-    header = "| Кластер | Тип | " + " | ".join(f"{c} дней" if c != NO_FRESHNESS else c
-                                          for c in columns) + " | ИТОГО |"
-    sep = "|---|---|" + "---:|" * (len(columns) + 1)
+    header = "| Кластер | Тип | свежее | старое | " + NO_FRESHNESS + " | ИТОГО |"
+    sep = "|---|---|---:|---:|---:|---:|"
     rows = [header, sep]
 
     order = sorted(row_totals, key=lambda k: (-row_totals[k], k[0]))
@@ -108,11 +107,11 @@ def report_filename(niche: str, generated_at: datetime | None = None) -> str:
 
 
 def demand_map_full(listings: list[dict], classifications: dict[int, dict] | None) -> str:
-    """Карта спроса с заголовком секции — для вставки в дайджест и в отчёт."""
+    """Карта спроса — для вставки в дайджест и в отчёт."""
     return build_demand_map_table(classifications, listings)
 
 
-def bucket_summary_line(bucket_counts: dict) -> str:
-    parts = [f"{label}: {bucket_counts.get(label, 0)}" for label, _, _ in FRESHNESS_BUCKETS]
-    parts.append(f"{NO_FRESHNESS}: {bucket_counts.get(NO_FRESHNESS, 0)}")
+def class_summary_line(class_counts: dict) -> str:
+    parts = [f"{label}: {class_counts.get(label, 0)}" for label in FRESHNESS_CLASSES]
+    parts.append(f"{NO_FRESHNESS}: {class_counts.get(NO_FRESHNESS, 0)}")
     return "; ".join(parts)

@@ -20,12 +20,14 @@ MAX_UPLOAD_MB = 20
 PREVIEW_COLUMNS = {
     "n": "#",
     "title": "Заголовок",
+    "freshness_class": "Свежесть (косв.)",
+    "freshness_basis": "Основание оценки",
     "views_today": "Просмотров сегодня (главный сигнал)",
     "views_total": "Всего просмотров (за всю жизнь)",
     "views_today_share": "Сегодня, % от общих",
     "price_raw": "Цена",
     "published_display": "Дата публ./продления",
-    "freshness_bucket": "Бакет (дней с публ.)",
+    "age_days": "Дней с публ.",
     "position": "Позиция",
     "seller_name": "Продавец",
     "paid_services": "Платные услуги",
@@ -167,7 +169,8 @@ if run or (result_key in results):
             summary = build_summary(listings)
             progress.progress(0.15, text="Метрики посчитаны")
             status.caption(
-                "Бакеты: " + ", ".join(f"{k}: {v}" for k, v in summary["bucket_counts"].items())
+                "Свежесть (косвенно): "
+                + ", ".join(f"{k}: {v}" for k, v in summary["class_counts"].items())
             )
 
             status.info("Стадия A — кластеризация объявлений (LLM)…")

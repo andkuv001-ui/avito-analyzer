@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from .dates import NO_FRESHNESS
-from .metrics import BUCKET_LABELS, FRESHNESS_BUCKETS
+from .metrics import FRESHNESS_CLASSES
 
 FULL_DESCRIPTION_LIMIT = 50
 DESCRIPTION_CUTOFF = 2000
@@ -14,22 +14,25 @@ DESCRIPTION_CUTOFF = 2000
 def rules(parsed_at: datetime) -> str:
     return f"""
 НАПОМИНАНИЯ ПРАВИЛ АНАЛИЗА (время парсинга выдачи: {parsed_at.strftime('%d.%m.%Y %H:%M')}):
-- «Просмотров сегодня» — ГЛАВНЫЙ сигнал текущей активности и эффективности объявления.
-  Он привязан ко времени парсинга: выгрузка сделана {parsed_at.strftime('%d.%m.%Y в %H:%M')},
-  учитывай это (для выгрузки вне утра «просмотров сегодня» — неполный день).
-- «Просмотров всего» — НЕ показатель эффективности: цифра накапливается за всю жизнь
-  объявления, включая периоды до последнего продления.
-- «Дата публикации» в выгрузке — дата последней публикации/ПРОДЛЕНИЯ, а не создания.
-  Истинный возраст объявления неизвестен (могло продляться ежемесячно годами).
-  Бакеты свежести 0–1/2–3/4–7/8–30/31+ означают «дней с (пере)публикации», не возраст.
-- Свежесть определяй только КОСВЕННО: «Дата публикации» ≤ 7 дней И соотношение
-  «Просмотров сегодня» к «Просмотров всего» согласуется с коротким сроком жизни
-  (сегодняшние просмотры — заметная доля от общих). Если при свежей дате «Просмотров всего»
-  много — это продлённое старое объявление.
-- Если данных нет — ставь [НЕТ ДАННЫХ]; возраст и просмотры не выдумывай.
-- Нет даты: [НЕДОСТАТОЧНО ДАННЫХ ДЛЯ ОЦЕНКИ СВЕЖЕСТИ].
-- Порядок рассуждения: свежесть (косвенно) → структура спроса → конкуренция →
-  коммерческие сценарии → гипотезы.
+- Интересуют только ДВЕ категории объявлений: СВЕЖИЕ и СТАРЫЕ. Промежуточные сроки
+  (сколько именно дней на площадке) значения не имеют.
+- «Дата публикации» — дата последней публикации/ПРОДЛЕНИЯ, а не создания. Истинный возраст
+  неизвестен (объявление могло продляться годами).
+- СВЕЖЕЕ — только по косвенным показателям: «Дата публикации» не старше 7 дней И связка
+  «Просмотров сегодня» ↔ «Просмотров всего» согласуется с коротким сроком жизни
+  (при сегодняшнем темпе «Всего» набирались бы за дни, а не за месяцы). Если при свежей дате
+  «Просмотров всего» слишком много — это СТАРОЕ (продлённое).
+- СТАРОЕ — всё, что старше 7 дней по дате, а также продлённые объявления с накопленными
+  просмотрами. Код уже проставил класс свежести каждому объявлению — не переоценивай.
+- ГЛАВНЫЙ ВОПРОС отчёта: что эффективнее — СВЕЖИЕ или СТАРЫЕ объявления?
+  Оценивай эффективность по «Просмотров сегодня» (главный сигнал).
+- «Просмотров сегодня» — ГЛАВНЫЙ сигнал текущей активности и эффективности. Он привязан
+  ко времени парсинга: {parsed_at.strftime('%d.%m.%Y %H:%M')}. Учитывай это (для выгрузки
+  вне начала дня «просмотров сегодня» — неполный день).
+- «Просмотров всего» — НЕ показатель эффективности: накапливается за всю жизнь объявления,
+  включая периоды до последнего продления.
+- Если данных нет — [НЕТ ДАННЫХ]; не выдумывай цифры. Нет даты —
+  [НЕДОСТАТОЧНО ДАННЫХ ДЛЯ ОЦЕНКИ СВЕЖЕСТИ].
 """.strip()
 
 
@@ -59,10 +62,10 @@ def _fmt_price(record: dict) -> str:
 
 def _fmt_freshness(record: dict) -> str:
     if record.get("published_at") is None:
-        return f"{NO_FRESHNESS}"
+        return NO_FRESHNESS
     return (
-        f"{record['published_display']} → {record['age_days']} дн. с (пере)публикации, "
-        f"бакет {record['freshness_bucket']} (истинный возраст неизвестен)"
+        f"{record['published_display']} → {record['age_days']} дн. с (пере)публикации → "
+        f"класс: {record['freshness_class']} ({record['freshness_basis']})"
     )
 
 
@@ -83,11 +86,11 @@ def _format_record(record: dict, cutoff: int | None) -> str:
         description = description[:cutoff] + "… [ОПИСАНИЕ ОБРЕЗАНО]"
 
     return "\n".join([
-        f"### Объявление #{record['n']}",
+        f"### Объявление #{record['n']} [{record.get('freshness_class') or NO_FRESHNESS}]",
         f"- Заголовок: {_fmt(record.get('title'))}",
         f"- Просмотры: {_fmt_views(record)}",
         f"- Цена: {_fmt_price(record)}",
-        f"- Дата публикации/продления: {_fmt_freshness(record)}",
+        f"- Свежесть: {_fmt_freshness(record)}",
         f"- Позиция: {_fmt(record.get('position'))}",
         f"- Платные услуги: {_fmt(record.get('paid_services'))}",
         f"- Продавец: {_fmt(record.get('seller_name'))} (рейтинг {_fmt(record.get('rating'))}, "
@@ -104,35 +107,57 @@ def _format_record(record: dict, cutoff: int | None) -> str:
 def build_metrics_tables(summary: dict) -> str:
     lines = ["## Сводные метрики (считаны кодом, не LLM)", ""]
 
+    lines.append("### Свежие vs старые (косвенная оценка)")
+    lines.append("| Класс | Объявлений |")
+    lines.append("|---|---:|")
+    for label in FRESHNESS_CLASSES:
+        lines.append(f"| {label} | {summary['class_counts'].get(label, 0)} |")
+    lines.append(f"| {NO_FRESHNESS} | {summary['class_counts'].get(NO_FRESHNESS, 0)} |")
+    lines.append("")
+
+    lines.append("### Эффективность: что эффективнее — свежие или старые?")
+    lines.append(
+        "Метрика эффективности — «Просмотров сегодня» (на момент парсинга). "
+        "«Всего» — только для справки, это накопленная за всю жизнь цифра."
+    )
+    lines.append("")
+    lines.append("| Метрика | свежее | старое |")
+    lines.append("|---|---:|---:|")
+    rows = [
+        ("Объявлений", "count"),
+        ("Просмотров сегодня — медиана", "views_today_median"),
+        ("Просмотров сегодня — сумма", "views_today_sum"),
+        ("Всего просмотров — медиана (справочно)", "views_total_median"),
+        ("С платными услугами, %", "promo_share"),
+        ("Цена — медиана", "price_median"),
+    ]
+    stats = summary["fresh_vs_stale"]
+    for title, key in rows:
+        f = stats.get(FRESHNESS_CLASSES[0], {}).get(key)
+        s = stats.get(FRESHNESS_CLASSES[1], {}).get(key)
+        lines.append(f"| {title} | {_fmt(f)} | {_fmt(s)} |")
+    lines.append("")
+
     lines.append("### Активность: Просмотров сегодня (главный сигнал, на момент парсинга)")
     if summary.get("views_today_top"):
-        lines.append("| № | Заголовок | Сегодня | Всего | Доля сегодняшних |")
-        lines.append("|---:|---|---:|---:|---:|")
+        lines.append("| № | Заголовок | Класс | Сегодня | Всего |")
+        lines.append("|---:|---|---|---:|---:|")
         for item in summary["views_today_top"]:
             lines.append(
-                f"| {item['n']} | {_fmt(item['title'])} | {_fmt(item['views_today'])} | "
-                f"{_fmt(item['views_total'])} | см. данные объявления |"
+                f"| {item['n']} | {_fmt(item['title'])} | {item['freshness_class']} | "
+                f"{_fmt(item['views_today'])} | {_fmt(item['views_total'])} |"
             )
     else:
         lines.append(f"{NO_FRESHNESS} для «Просмотров сегодня».")
     lines.append("")
 
-    lines.append("### Дней с (пере)публикации (бакеты; истинный возраст неизвестен)")
-    lines.append("| Бакет | Объявлений |")
-    lines.append("|---|---:|")
-    for label, lo, hi in FRESHNESS_BUCKETS:
-        lines.append(f"| {label} дней | {summary['bucket_counts'].get(label, 0)} |")
-    lines.append(f"| {NO_FRESHNESS} | {summary['bucket_counts'].get(NO_FRESHNESS, 0)} |")
-    lines.append("")
-
-    lines.append("### Цены по бакетам")
-    lines.append("| Бакет | N | Мин | Медиана | Макс |")
+    lines.append("### Цены по классам")
+    lines.append("| Класс | N | Мин | Медиана | Макс |")
     lines.append("|---|---:|---:|---:|---:|")
-    for label in BUCKET_LABELS:
-        stats = summary["price_by_bucket"][label]
+    for label in FRESHNESS_CLASSES:
+        s = summary["price_by_class"][label]
         lines.append(
-            f"| {label} | {stats['count']} | {_fmt(stats['min'])} | "
-            f"{_fmt(stats['median'])} | {_fmt(stats['max'])} |"
+            f"| {label} | {s['count']} | {_fmt(s['min'])} | {_fmt(s['median'])} | {_fmt(s['max'])} |"
         )
     lines.append("")
     overall = summary["price_overall"]
@@ -153,7 +178,7 @@ def build_metrics_tables(summary: dict) -> str:
     lines.append(f"Объявлений с платными услугами: {summary['promo_used']} из {summary['total']}.")
     lines.append("")
 
-    lines.append("### Пре-кластеры (категория 1 / категория 2)")
+    lines.append("### Пре-кластеры (категория 1)")
     lines.append("| Категория | Объявлений |")
     lines.append("|---|---:|")
     for name, count in (summary["category_1"] or []):
@@ -163,11 +188,12 @@ def build_metrics_tables(summary: dict) -> str:
     lines.append("")
 
     lines.append("### Продавцы")
-    lines.append("| Продавец | Объявлений в выдаче | Рейтинг | Отзывы | Документы |")
-    lines.append("|---|---:|---:|---:|---|")
+    lines.append("| Продавец | Всего в выдаче | свежее | старое | Рейтинг | Отзывы | Документы |")
+    lines.append("|---|---:|---:|---:|---:|---:|---|")
     for seller in summary["sellers"][:20]:
         lines.append(
-            f"| {seller['name']} | {seller['listings_in_serp']} | {_fmt(seller['rating'])} | "
+            f"| {seller['name']} | {seller['listings_in_serp']} | {seller['fresh']} | "
+            f"{seller['stale']} | {_fmt(seller['rating'])} | "
             f"{_fmt(seller['reviews'])} | {'да' if seller['docs_verified'] else 'нет'} |"
         )
     lines.append("")
@@ -196,7 +222,7 @@ def build_digest(listings: list[dict], summary: dict, demand_map_md: str,
         rules(parsed_at),
         "",
         build_metrics_tables(summary),
-        "## Карта спроса (счётчики посчитаны кодом)",
+        "## Карта спроса (счётчики посчитаны кодом; классы свежести — кодовые)",
         "",
         demand_map_md,
         "",
