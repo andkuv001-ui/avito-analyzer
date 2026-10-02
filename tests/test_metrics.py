@@ -37,26 +37,31 @@ def test_freshness_buckets(age, expected):
     assert bucket_for_age(age) == expected
 
 
-def test_age_and_views_per_day():
+def test_age_days_is_days_since_publication():
     published = datetime(2026, 9, 1, 10, 0)
     m = compute_listing_metrics(_listing(published_at=published, views_total=100), REF)
     assert m["age_days"] == 30
     assert m["freshness_bucket"] == "8–30"
-    assert m["views_per_day"] == pytest.approx(3.3)
+    assert "views_per_day" not in m
 
 
-def test_fresh_listing_uses_full_day_divisor():
+def test_views_today_share():
     published = datetime(2026, 10, 1, 12, 0)
-    m = compute_listing_metrics(_listing(published_at=published, views_total=50), REF)
-    assert m["age_days"] == 0
-    assert m["views_per_day"] == 50.0
+    m = compute_listing_metrics(
+        _listing(published_at=published, views_total=50, views_today=10), REF
+    )
+    assert m["views_today_share"] == 20.0
+    m2 = compute_listing_metrics(
+        _listing(published_at=published, views_total=None, views_today=10), REF
+    )
+    assert m2["views_today_share"] is None
 
 
 def test_missing_date_no_freshness_no_vpd():
     m = compute_listing_metrics(_listing(), REF)
     assert m["age_days"] is None
     assert m["freshness_bucket"] == NO_FRESHNESS
-    assert m["views_per_day"] is None
+    assert "views_per_day" not in m
     assert m["freshness_note"] == NO_FRESHNESS
 
 
@@ -107,6 +112,7 @@ def test_fixture_parse_and_metrics():
     records = parsed["records"]
     assert len(records) == 12
     assert len(parsed["ignored"]) == 3
+    assert parsed["parsed_at"] is not None
     assert not any("Нет колонки" in w for w in parsed["warnings"])
 
     listings = [compute_listing_metrics(r, REF) for r in records]

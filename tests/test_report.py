@@ -78,7 +78,8 @@ def test_assemble_report_has_sections_1_10_and_table():
     table = build_demand_map_table(_classifications(), listings)
     report = assemble_report(_stage_b_text(), table,
                              niche="кактусы", region="Москва",
-                             total=3, model="openai/gpt-4o-mini", generated_at=REF)
+                             total=3, model="openai/gpt-4o-mini", generated_at=REF,
+                             parsed_at=datetime(2026, 10, 1, 18, 5))
 
     for i in range(1, 11):
         assert f"## {i}." in report
@@ -86,6 +87,8 @@ def test_assemble_report_has_sections_1_10_and_table():
     assert "| Кластер | Тип |" in report
     assert "**ИТОГО**" in report
     assert "кактусы" in report and "Москва" in report
+    assert "Время парсинга выгрузки" in report
+    assert "01.10.2026 18:05" in report
     assert "3" in report.split("Объявлений в выдаче")[1][:40]
 
 

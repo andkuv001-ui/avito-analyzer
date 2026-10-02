@@ -20,11 +20,12 @@ MAX_UPLOAD_MB = 20
 PREVIEW_COLUMNS = {
     "n": "#",
     "title": "Заголовок",
+    "views_today": "Просмотров сегодня (главный сигнал)",
+    "views_total": "Всего просмотров (за всю жизнь)",
+    "views_today_share": "Сегодня, % от общих",
     "price_raw": "Цена",
-    "published_display": "Дата публикации",
-    "freshness_bucket": "Бакет свежести",
-    "views_total": "Всего просмотров",
-    "views_per_day": "Просм./день",
+    "published_display": "Дата публ./продления",
+    "freshness_bucket": "Бакет (дней с публ.)",
     "position": "Позиция",
     "seller_name": "Продавец",
     "paid_services": "Платные услуги",
@@ -120,6 +121,10 @@ st.caption(
     f"Строк: {len(records)} · Колонок в файле: {parsed['total_columns']} · "
     f"Проигнорировано товарных колонок: {len(parsed['ignored'])}"
 )
+st.caption(
+    f"⏱ Время парсинга: {parsed['parsed_at'].strftime('%d.%m.%Y %H:%M')} — "
+    "«Просмотров сегодня» привязано к этому моменту."
+)
 for warning in parsed["warnings"]:
     st.warning(warning)
 
@@ -190,7 +195,8 @@ if run or (result_key in results):
 
             demand_map_md = build_demand_map_table(classifications, listings)
             digest_text = build_digest(listings, summary, demand_map_md,
-                                       niche.strip(), region.strip(), reference_now)
+                                       niche.strip(), region.strip(), reference_now,
+                                       parsed_at=parsed["parsed_at"])
 
             status.info("Стадия B — генерация отчёта (LLM)…")
             system_prompt = build_system_prompt(
@@ -203,6 +209,7 @@ if run or (result_key in results):
                 stage_b_md, demand_map_md,
                 niche=niche.strip(), region=region.strip(),
                 total=len(listings), model=config.get_model(model_override),
+                parsed_at=parsed["parsed_at"],
             )
             results[result_key] = {
                 "report": report_md,

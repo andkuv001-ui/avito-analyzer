@@ -90,6 +90,7 @@ def _is_verified(value) -> bool:
 def parse_workbook(path: str | Path, reference_now: datetime | None = None) -> dict:
     """→ {'records': [...], 'warnings': [...], 'mapping': {...}, 'ignored': [...], 'total_columns': int}"""
     reference_now = reference_now or datetime.now()
+    parsed_at = datetime.now()
     frame = pd.read_excel(path, dtype=object)
     columns = list(frame.columns)
     mapping = map_columns(columns)
@@ -150,4 +151,5 @@ def parse_workbook(path: str | Path, reference_now: datetime | None = None) -> d
         "ignored": ignored,
         "total_columns": len(columns),
         "core_keys": list(CORE_COLUMNS.keys()),
+        "parsed_at": parsed_at,
     }

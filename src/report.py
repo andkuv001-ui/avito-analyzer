@@ -68,26 +68,35 @@ def _insert_demand_map(stage_b_md: str, table_md: str) -> str:
 
 
 def meta_block(niche: str, region: str, total: int, model: str,
-               generated_at: datetime) -> str:
-    return "\n".join([
+               generated_at: datetime, parsed_at: datetime | None = None) -> str:
+    lines = [
         f"- **Ниша / товар:** {niche}",
         f"- **Регион:** {region}",
         f"- **Объявлений в выдаче:** {total}",
+    ]
+    if parsed_at is not None:
+        lines.append(
+            f"- **Время парсинга выгрузки:** {parsed_at.strftime('%d.%m.%Y %H:%M')} "
+            f"(«Просмотров сегодня» — на этот момент)"
+        )
+    lines += [
         f"- **Модель:** {model}",
         f"- **Сформирован:** {generated_at.strftime('%d.%m.%Y %H:%M')}",
         "",
         "---",
         "",
-    ])
+    ]
+    return "\n".join(lines)
 
 
 def assemble_report(stage_b_md: str, demand_map_md: str, niche: str, region: str,
-                    total: int, model: str, generated_at: datetime | None = None) -> str:
+                    total: int, model: str, generated_at: datetime | None = None,
+                    parsed_at: datetime | None = None) -> str:
     generated_at = generated_at or datetime.now()
     body = _insert_demand_map(stage_b_md.strip(), demand_map_md)
     body = re.sub(r"^#\s+Аналитический отчёт[^\n]*\n+", "", body, count=1)
-    parts = ["# Аналитический отчёт по выдаче Avito", "", 
-             meta_block(niche, region, total, model, generated_at), body, ""]
+    parts = ["# Аналитический отчёт по выдаче Avito", "",
+             meta_block(niche, region, total, model, generated_at, parsed_at), body, ""]
     return "\n".join(parts)
 
 

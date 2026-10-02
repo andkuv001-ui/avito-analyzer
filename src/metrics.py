@@ -46,20 +46,20 @@ def compute_listing_metrics(record: dict, reference_now: datetime) -> dict:
         out["age_days"] = None
         out["freshness_bucket"] = NO_FRESHNESS
         out["freshness_note"] = NO_FRESHNESS
-        out["views_per_day"] = None
-        out["views_per_day_note"] = None
     else:
         out["freshness_note"] = None
         age = (reference_now.date() - published.date()).days
         out["age_days"] = max(age, 0)
         out["freshness_bucket"] = bucket_for_age(out["age_days"])
-        total = record.get("views_total")
-        if total is not None:
-            out["views_per_day"] = round(total / max(out["age_days"], 1), 1)
-            out["views_per_day_note"] = "накопленный период неизвестен"
-        else:
-            out["views_per_day"] = None
-            out["views_per_day_note"] = None
+
+    # views_per_day не считаем: «Дата публикации» может быть датой продления,
+    # а «Всего просмотров» накапливается за всё время жизни объявления.
+    total = record.get("views_total")
+    today = record.get("views_today")
+    if total and today is not None and total > 0:
+        out["views_today_share"] = round(today / total * 100, 1)
+    else:
+        out["views_today_share"] = None
 
     out["promo_flags"] = _promo_flags(record.get("paid_services"))
     out["has_paid_services"] = bool(record.get("paid_services"))
@@ -125,6 +125,13 @@ def build_summary(listings: list[dict]) -> dict:
 
     seller_list = sorted(sellers.values(), key=lambda s: -s["listings_in_serp"])
 
+    views_today_top = sorted(
+        ({"n": l["n"], "title": l.get("title"),
+          "views_today": l.get("views_today"), "views_total": l.get("views_total")}
+         for l in listings if l.get("views_today") is not None),
+        key=lambda x: -x["views_today"],
+    )[:10]
+
     return {
         "total": len(listings),
         "bucket_counts": {label: bucket_counts.get(label, 0) for label in BUCKET_LABELS}
@@ -140,4 +147,5 @@ def build_summary(listings: list[dict]) -> dict:
         "sellers": seller_list,
         "unique_sellers": len(sellers),
         "docs_verified": sum(1 for l in listings if l.get("docs_verified")),
+        "views_today_top": views_today_top,
     }
