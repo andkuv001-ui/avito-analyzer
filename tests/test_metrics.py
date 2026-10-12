@@ -5,8 +5,10 @@ import pytest
 
 from src.dates import NO_FRESHNESS
 from src.metrics import (
+    FACT_NAMES,
     FRESH_LABEL,
     STALE_LABEL,
+    build_fact_pack,
     build_summary,
     classify_freshness,
     compute_listing_metrics,
@@ -175,3 +177,166 @@ def test_fixture_without_date_column():
     assert all(l["freshness_class"] == NO_FRESHNESS for l in listings)
     summary = build_summary(listings)
     assert summary["class_counts"][NO_FRESHNESS] == 12
+
+
+# --- build_fact_pack -------------------------------------------------------
+
+NO_DATA = "[НЕТ ДАННЫХ]"
+
+
+def _fact_listings():
+    return [
+        # свежее
+        compute_listing_metrics(_listing(
+            n=1, published_at=datetime(2026, 10, 1), views_today=10, views_total=20,
+            price=100.0, seller_name="A"), REF),
+        # старое (возраст > 7 дней)
+        compute_listing_metrics(_listing(
+            n=2, published_at=datetime(2026, 8, 1), views_today=0, views_total=5000,
+            price=200.0, seller_name="A", paid_services="Витрина"), REF),
+        # без даты, без просмотров, без цены
+        compute_listing_metrics(_listing(n=3, seller_name="B"), REF),
+        # продлённое: дата ≤7 дн., накопленные просмотры
+        compute_listing_metrics(_listing(
+            n=4, published_at=datetime(2026, 9, 28), views_today=5, views_total=1000,
+            price=300.0, seller_name="B"), REF),
+    ]
+
+
+def _fact_classifications():
+    return {
+        1: {"b2b": "B2C", "clusters": [{"kind": "товарный", "tag": "мох"}],
+            "queries": ["мох купить", "живой мох"], "usp": None, "scenario": None},
+        2: {"b2b": "B2B", "clusters": [{"kind": "коммерческий", "tag": "опт"}],
+            "queries": ["мох оптом"], "usp": None, "scenario": None},
+        3: {"b2b": "B2C", "clusters": [], "queries": [], "usp": None, "scenario": None},
+        4: {"b2b": "B2C", "clusters": [{"kind": "товарный", "tag": "мох"},
+                                       {"kind": "сценарный", "tag": "подарок"}],
+            "queries": [], "usp": None, "scenario": None},
+    }
+
+
+def _facts(listings, classifications=None):
+    return build_fact_pack(listings, build_summary(listings), classifications)
+
+
+def _fact(lines: list[str], name: str) -> str:
+    prefix = f"[{name}] "
+    for line in lines:
+        if line.startswith(prefix):
+            return line[len(prefix):]
+    raise AssertionError(f"нет факта «{name}» в {lines}")
+
+
+def test_fact_pack_empty_listings_all_no_data():
+    facts = build_fact_pack([], build_summary([]), None)
+    assert len(facts) == len(FACT_NAMES)
+    assert [line.split("]")[0][1:] for line in facts] == list(FACT_NAMES)
+    assert all(line.endswith(NO_DATA) for line in facts)
+
+
+def test_fact_pack_volume_and_classes():
+    facts = _facts(_fact_listings(), _fact_classifications())
+    assert _fact(facts, "объём") == "всего 4; с датой публикации 3; без даты 1"
+    classes = _fact(facts, "классы")
+    assert "свежее 1 / старое 2 / без оценки 1" in classes
+    assert "медиана возраста старых 32" in classes
+    assert "продлённых (старое при возрасте ≤7 дн.) 1" in classes
+
+
+def test_fact_pack_zero_views():
+    facts = _facts(_fact_listings(), _fact_classifications())
+    zero = _fact(facts, "нулевые просмотры")
+    assert "суммарно за сегодня 15" in zero
+    assert "с 0 просмотров сегодня — 1 (33.3%)" in zero
+    assert "без данных о «Просмотров сегодня» — 1" in zero
+
+
+def test_fact_pack_zero_views_is_not_missing_data():
+    listings = [
+        compute_listing_metrics(_listing(n=1, views_today=0, views_total=100), REF),
+        compute_listing_metrics(_listing(n=2), REF),
+    ]
+    zero = _fact(_facts(listings), "нулевые просмотры")
+    assert "суммарно за сегодня 0" in zero
+    assert "с 0 просмотров сегодня — 1 (100.0%)" in zero
+    assert "без данных о «Просмотров сегодня» — 1" in zero
+    # 0 просмотров при знаменателе 0 → концентрация не считается
+    assert _fact(_facts(listings), "концентрация топ-10") == NO_DATA
+
+
+def test_fact_pack_top10_concentration():
+    facts = _facts(_fact_listings(), _fact_classifications())
+    top = _fact(facts, "концентрация топ-10")
+    assert "топ-3 по «Просмотров сегодня» держат 100.0% суммарных сегодняшних (15 из 15)" in top
+
+
+def test_fact_pack_promo_effect():
+    facts = _facts(_fact_listings(), _fact_classifications())
+    promo = _fact(facts, "promo-эффект")
+    assert "с платными услугами — 0 (1 шт.)" in promo
+    assert "без — 7.5 (3 шт.)" in promo
+    assert "отношение ×0.0" in promo
+
+
+def test_fact_pack_fresh_vs_stale():
+    facts = _facts(_fact_listings(), _fact_classifications())
+    fvs = _fact(facts, "свежие vs старые")
+    assert "свежее — 10 (1 шт.)" in fvs
+    assert "старое — 2.5 (2 шт.)" in fvs
+    assert "отношение ×4.0" in fvs
+
+
+def test_fact_pack_price_vs_demand():
+    facts = _facts(_fact_listings(), _fact_classifications())
+    price = _fact(facts, "цена vs спрос")
+    assert "медиана цены 200, коридор 100–300" in price
+    assert "«договорная» — 0" in price
+    assert "дешёвой половины — 5" in price
+    assert "дорогой — 5" in price
+    assert "отношение ×1.0" in price
+
+
+def test_fact_pack_top3_sellers():
+    facts = _facts(_fact_listings(), _fact_classifications())
+    sellers = _fact(facts, "продавцы")
+    assert "топ-2 продавцов — 4 из 4 объявлений (100.0%)" in sellers
+    assert "с >1 объявлением — 2" in sellers
+    assert "с платными услугами — 1" in sellers
+
+
+def test_fact_pack_clusters_without_fresh_name_and_content():
+    facts = _facts(_fact_listings(), _fact_classifications())
+    assert facts[8].startswith("[кластеры без свежих] ")
+    clusters = _fact(facts, "кластеры без свежих")
+    assert "теги без свежих объявлений: опт (1), подарок (1)" in clusters
+
+
+def test_fact_pack_b2b_and_top_queries():
+    facts = _facts(_fact_listings(), _fact_classifications())
+    assert _fact(facts, "B2B-доля") == "объявлений с B2B 1 (25.0%)"
+    assert _fact(facts, "топ-5 запросов") == "мох купить (1), живой мох (1), мох оптом (1)"
+
+
+def test_fact_pack_without_classifications():
+    facts = _facts(_fact_listings(), None)
+    for name in ("кластеры без свежих", "B2B-доля", "топ-5 запросов"):
+        assert _fact(facts, name) == NO_DATA
+    assert _fact(facts, "объём") == "всего 4; с датой публикации 3; без даты 1"
+
+
+def test_fact_pack_empty_bases():
+    listings = [
+        compute_listing_metrics(_listing(n=1), REF),
+        compute_listing_metrics(_listing(n=2), REF),
+    ]
+    facts = _facts(listings, {})
+    assert _fact(facts, "концентрация топ-10") == NO_DATA
+    assert NO_DATA in _fact(facts, "нулевые просмотры")
+    assert NO_DATA in _fact(facts, "promo-эффект")
+    assert NO_DATA in _fact(facts, "свежие vs старые")
+    assert NO_DATA in _fact(facts, "цена vs спрос")
+    assert "«договорная» — 0" in _fact(facts, "цена vs спрос")
+    assert _fact(facts, "кластеры без свежих") == NO_DATA
+    assert _fact(facts, "топ-5 запросов") == NO_DATA
+    assert _fact(facts, "B2B-доля") == "объявлений с B2B 0 (0.0%)"

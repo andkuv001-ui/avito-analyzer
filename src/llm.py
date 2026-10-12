@@ -7,10 +7,19 @@ import re
 from typing import Callable
 
 from . import config
+from .dates import NO_FRESHNESS
 
 ALLOWED_KINDS = {"товарный", "характеристический", "сценарный", "проблемный", "коммерческий"}
 CHUNK_SIZE = 8
 DESCRIPTION_LIMIT = 1500
+
+NO_DATA_MARKER = "[НЕТ ДАННЫХ]"
+HYPOTHESIS_MARKER = "[НЕДОСТАТОЧНО ДАННЫХ ДЛЯ ГИПОТЕЗ]"
+GROUNDING_MARKERS = (NO_DATA_MARKER, HYPOTHESIS_MARKER, NO_FRESHNESS)
+MIN_HYPOTHESES = 5
+MAX_HYPOTHESES = 10
+CONCLUSION_POINTS = 7
+GROUNDING_WARNING_PREFIX = "Часть гипотез/выводов не прошла проверку на привязку к данным: "
 
 STAGE_A_SYSTEM = """Ты — аналитик поисковой выдачи Avito. Твоя задача — классифицировать объявления.
 
@@ -211,11 +220,160 @@ def build_system_prompt(niche: str, region: str, prompt_template: str) -> str:
     )
 
 
-def generate_report(system_prompt: str, digest_text: str, model: str | None = None) -> str:
-    """Стадия B: финальный Markdown-отчёт (секции 1–10)."""
+# --- Валидация привязки секций 9–10 к данным (Grounding) -------------------
+
+# Разряды через пробел/nbsp: «1 200» → «1200», «12 345 678» → «12345678».
+# Группа справа ровно 3 цифры, иначе это два отдельных числа («10 15»).
+_THOUSANDS_SEP_RE = re.compile(r"(?<=\d)[\s  ](?=\d{3}(?!\d))")
+_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+_RE_SECTION_1 = re.compile(r"^#+\s*1[\.\s]", flags=re.MULTILINE)
+_RE_SECTION_9 = re.compile(r"^##\s*9(?:[.:]|\s)", flags=re.MULTILINE)
+_RE_SECTION_10 = re.compile(r"^##\s*10[.:]", flags=re.MULTILINE)
+_RE_HYP_HEADER = re.compile(r"^\*\*Гипотеза\s+(\d+):", flags=re.MULTILINE)
+_RE_HYP_ANY = re.compile(r"Гипотеза\s*\d+")
+_RE_HYP_LINE = re.compile(r"^\*\*Гипотеза\s+\d+:")
+_RE_POINT = re.compile(r"^\s*(\d+)\)", flags=re.MULTILINE)
+_RE_POINT_BAD = re.compile(r"^\s*(\d+)\.", flags=re.MULTILINE)
+
+
+def normalize_numbers(text: str) -> set[float]:
+    r"""Нормализованные числовые токены текста.
+
+    1) убираются разделители разрядов («1 200» → 1200); 2) токен `\d+([.,]\d+)?`
+    → float (запятая → точка); 3) `%`/`≈`/`~` на токен не влияют;
+    4) диапазон «10–15» даёт оба токена; 5) «тыс.»/«млн» не раскрываются,
+    дроби «2/3» не склеиваются — задокументированное ограничение.
+    """
+    cleaned = _THOUSANDS_SEP_RE.sub("", text)
+    return {float(m.group(0).replace(",", ".")) for m in _NUMBER_RE.finditer(cleaned)}
+
+
+def _has_marker(text: str) -> bool:
+    return any(marker in text for marker in GROUNDING_MARKERS)
+
+
+def _slice_blocks(body: str, headers: list) -> list[str]:
+    blocks = []
+    for i, header in enumerate(headers):
+        start = header.end()
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(body)
+        blocks.append(body[start:end])
+    return blocks
+
+
+def validate_grounding(text: str, digest_text: str) -> list[str]:
+    """Проверка секций 9 и 10 по политике Grounding. Пустой список = OK."""
+    violations: list[str] = []
+    digest_tokens = normalize_numbers(digest_text)
+
+    section_9 = _RE_SECTION_9.search(text)
+    section_10 = _RE_SECTION_10.search(text)
+
+    if section_9 is None:
+        violations.append("нет секции 9 «Гипотезы» (заголовок вида «## 9. Гипотезы»)")
+    elif section_10 is not None and section_9.start() > section_10.start():
+        violations.append("секция 9 идёт после секции 10 — нарушена структура отчёта")
+        section_9 = None
+
+    if section_10 is None:
+        violations.append("нет секции 10 «Вывод и рекомендации» (заголовок вида «## 10. Вывод и рекомендации»)")
+        return violations
+
+    if section_9 is not None:
+        body_9 = text[section_9.end():section_10.start()]
+        headers = list(_RE_HYP_HEADER.finditer(body_9))
+        for line in body_9.splitlines():
+            if _RE_HYP_ANY.search(line) and not _RE_HYP_LINE.match(line):
+                violations.append(
+                    "гипотеза оформлена не по шаблону (нужен заголовок вида «**Гипотеза N: …**»): "
+                    + line.strip()[:80]
+                )
+        count = len(headers)
+        if count < MIN_HYPOTHESES or count > MAX_HYPOTHESES:
+            violations.append(f"гипотез: {count} — требуется от {MIN_HYPOTHESES} до {MAX_HYPOTHESES}")
+        for header, block in zip(headers, _slice_blocks(body_9, headers)):
+            label = f"гипотеза {header.group(1)}"
+            if "Основание" not in block:
+                violations.append(f"{label}: нет подстроки «Основание»")
+            if "Проверка" not in block:
+                violations.append(f"{label}: нет подстроки «Проверка»")
+            if _has_marker(block):
+                continue  # маркер данных освобождает от цитаты дайджеста
+            tokens = normalize_numbers(block)
+            if not tokens:
+                violations.append(f"{label}: после заголовка нет ни одной цифры и нет маркера данных")
+            elif not (tokens & digest_tokens):
+                violations.append(f"{label}: цифры не встречаются в дайджесте — нет цитаты из данных")
+
+    body_10 = text[section_10.end():]
+    bad_points = _RE_POINT_BAD.findall(body_10)
+    if bad_points:
+        violations.append(
+            "пункты §10 оформлены точкой вместо скобки ("
+            + ", ".join(f"«{p}.»" for p in bad_points)
+            + ") — нужна нумерация 1)…7)"
+        )
+    points = list(_RE_POINT.finditer(body_10))
+    numbers = [int(p.group(1)) for p in points]
+    if numbers != list(range(1, CONCLUSION_POINTS + 1)):
+        violations.append(
+            f"§10: найдены пункты {numbers or '—'} — требуется ровно {CONCLUSION_POINTS} "
+            f"пунктов нумерацией 1)–{CONCLUSION_POINTS})"
+        )
+    for point, body in zip(points, _slice_blocks(body_10, points)):
+        number = int(point.group(1))
+        if not 1 <= number <= CONCLUSION_POINTS:
+            continue
+        if _has_marker(body):
+            continue
+        tokens = normalize_numbers(body)
+        if number < CONCLUSION_POINTS:
+            if not tokens:
+                violations.append(f"п.10.{number}: нет цифры и нет маркера данных")
+        elif not (tokens & digest_tokens):
+            violations.append(
+                "п.10.7: действие не подкреплено цифрой из дайджеста и нет маркера данных"
+            )
+
+    return violations
+
+
+def _grounding_feedback(violations: list[str]) -> str:
+    return (
+        "\n\nПРЕДЫДУЩИЙ ОТВЕТ НЕ ПРОШЁЛ ПРОВЕРКУ НА ПРИВЯЗКУ К ДАННЫМ:\n"
+        + "\n".join(f"- {v}" for v in violations)
+        + "\nИсправь отчёт: соблюдай строгий формат секций 9 и 10 и цитируй цифры из дайджеста."
+    )
+
+
+def _has_section_one(text: str) -> bool:
+    return bool(_RE_SECTION_1.search(text))
+
+
+def generate_report(system_prompt: str, digest_text: str,
+                    model: str | None = None) -> tuple[str, str | None]:
+    """Стадия B: финальный Markdown-отчёт (секции 1–10) + предупреждение Grounding.
+
+    Один повторный вызов с feedback при нарушениях секций 9–10; после повторного
+    провала текст принимается, warning сообщает о непройденной проверке.
+    """
     resolved_model = config.get_model(model)
     client = _client()
     text = _chat(client, resolved_model, system_prompt, digest_text, temperature=0.3)
-    if not re.search(r"^#+\s*1[\.\s]", text, flags=re.MULTILINE):
+    if not _has_section_one(text):
         raise LLMError("LLM не вернул структурированный отчёт (нет секции 1) — повторите попытку.")
-    return text
+
+    violations = validate_grounding(text, digest_text)
+    if not violations:
+        return text, None
+
+    retry = _chat(client, resolved_model, system_prompt,
+                  digest_text + _grounding_feedback(violations), temperature=0.3)
+    if _has_section_one(retry):
+        retry_violations = validate_grounding(retry, digest_text)
+        if not retry_violations:
+            return retry, None
+        text, violations = retry, retry_violations
+
+    return text, GROUNDING_WARNING_PREFIX + "; ".join(violations)

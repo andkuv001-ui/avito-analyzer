@@ -56,6 +56,8 @@ def _load_prompt() -> str:
 
 def _render_report(result: dict):
     st.success("Отчёт готов.")
+    if result.get("warning"):
+        st.warning(result["warning"])
     st.markdown(result["report"])
     st.download_button(
         "Скачать отчёт (.md)",
@@ -199,13 +201,16 @@ if run or (result_key in results):
             demand_map_md = build_demand_map_table(classifications, listings)
             digest_text = build_digest(listings, summary, demand_map_md,
                                        niche.strip(), region.strip(), reference_now,
-                                       parsed_at=parsed["parsed_at"])
+                                       parsed_at=parsed["parsed_at"],
+                                       classifications=classifications)
 
             status.info("Стадия B — генерация отчёта (LLM)…")
             system_prompt = build_system_prompt(
                 niche.strip(), region.strip(), _load_prompt()
             )
-            stage_b_md = generate_report(system_prompt, digest_text, model=model_override)
+            stage_b_md, grounding_warning = generate_report(
+                system_prompt, digest_text, model=model_override
+            )
             progress.progress(0.9, text="Сборка отчёта…")
 
             report_md = assemble_report(
@@ -217,6 +222,7 @@ if run or (result_key in results):
             results[result_key] = {
                 "report": report_md,
                 "filename": report_filename(niche.strip()),
+                "warning": grounding_warning,
             }
             progress.progress(1.0, text="Готово")
             status.empty()

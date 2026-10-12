@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from .dates import NO_FRESHNESS
-from .metrics import FRESHNESS_CLASSES
+from .metrics import FRESHNESS_CLASSES, build_fact_pack
 
 FULL_DESCRIPTION_LIMIT = 50
 DESCRIPTION_CUTOFF = 2000
@@ -87,10 +87,20 @@ def _fmt_views(record: dict) -> str:
     return ", ".join(parts)
 
 
-def _format_record(record: dict, cutoff: int | None) -> str:
+def _format_record(record: dict, cutoff: int | None,
+                   classifications: dict[int, dict] | None = None) -> str:
     description = record.get("description") or "[НЕТ ДАННЫХ]"
     if cutoff is not None and len(description) > cutoff:
         description = description[:cutoff] + "… [ОПИСАНИЕ ОБРЕЗАНО]"
+
+    cls = (classifications or {}).get(record["n"])
+    if cls is None:
+        queries = usp = scenario = b2b = "[НЕТ ДАННЫХ]"
+    else:
+        queries = ", ".join(str(q) for q in cls.get("queries") or []) or "[НЕТ ДАННЫХ]"
+        usp = _fmt(cls.get("usp"))
+        scenario = _fmt(cls.get("scenario"))
+        b2b = _fmt(cls.get("b2b"))
 
     return "\n".join([
         f"### Объявление #{record['n']} [{record.get('freshness_class') or NO_FRESHNESS}]",
@@ -105,6 +115,10 @@ def _format_record(record: dict, cutoff: int | None) -> str:
         f"документы проверены: {'да' if record.get('docs_verified') else 'нет'})",
         f"- Адрес: {_fmt(record.get('address'))}",
         f"- Категории: {' / '.join(record['categories']) if record.get('categories') else '[НЕТ ДАННЫХ]'}",
+        f"- Запросы: {queries}",
+        f"- УТП: {usp}",
+        f"- Сценарий: {scenario}",
+        f"- Тип: {b2b}",
         f"- Ссылка: {_fmt(record.get('url'))}",
         f"- Avito ID: {_fmt(record.get('avito_id'))}",
         f"- Описание: {description}",
@@ -212,9 +226,11 @@ def build_metrics_tables(summary: dict) -> str:
 
 def build_digest(listings: list[dict], summary: dict, demand_map_md: str,
                  niche: str, region: str, reference_now: datetime,
-                 parsed_at: datetime | None = None) -> str:
+                 parsed_at: datetime | None = None,
+                 classifications: dict[int, dict] | None = None) -> str:
     parsed_at = parsed_at or reference_now
     cutoff = None if len(listings) <= FULL_DESCRIPTION_LIMIT else DESCRIPTION_CUTOFF
+    facts = build_fact_pack(listings, summary, classifications)
 
     parts = [
         "# ДАЙДЖЕСТ ВЫДАЧИ AVITO",
@@ -228,6 +244,10 @@ def build_digest(listings: list[dict], summary: dict, demand_map_md: str,
         "",
         rules(parsed_at),
         "",
+        "## Ключевые факты (посчитаны кодом)",
+        "",
+        *facts,
+        "",
         build_metrics_tables(summary),
         "## Карта спроса (счётчики посчитаны кодом; классы свежести — кодовые)",
         "",
@@ -237,6 +257,6 @@ def build_digest(listings: list[dict], summary: dict, demand_map_md: str,
         "",
     ]
     for record in listings:
-        parts.append(_format_record(record, cutoff))
+        parts.append(_format_record(record, cutoff, classifications))
         parts.append("")
     return "\n".join(parts)
