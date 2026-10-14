@@ -165,8 +165,8 @@ def _render_auth_gate():
         password = st.text_input("Пароль (минимум 6 символов)", type="password",
                                  key="auth_reg_password")
         repeat = st.text_input("Повторите пароль", type="password", key="auth_reg_repeat")
-        st.caption("После регистрации подтвердите email по ссылке из письма — "
-                   "без подтверждения вход невозможен.")
+        st.caption("Если в Supabase включено подтверждение email — активируйте аккаунт "
+                   "по ссылке из письма; при авто-подтверждении сразу переходите ко входу.")
         if st.button("Зарегистрироваться", disabled=not (email.strip() and password)):
             if len(password) < 6:
                 st.error("Пароль слишком короткий — минимум 6 символов.")
@@ -174,12 +174,15 @@ def _render_auth_gate():
                 st.error("Пароли не совпадают.")
             else:
                 try:
-                    sign_up(email.strip(), password)
+                    result = sign_up(email.strip(), password)
                 except StorageError as exc:
                     st.error(str(exc))
                 else:
-                    st.success("Аккаунт создан. Подтвердите email по ссылке из письма "
-                               "и войдите на вкладке «Вход».")
+                    if result.get("needs_confirmation"):
+                        st.success("Аккаунт создан. Подтвердите email по ссылке из письма "
+                                   "и войдите на вкладке «Вход».")
+                    else:
+                        st.success("Аккаунт создан — можно войти на вкладке «Вход».")
 
 
 def _persist_report(user_id: str, niche: str, region: str, file_name: str,

@@ -57,7 +57,7 @@ def get_auth_client():
         from supabase import create_client
 
         url, anon, _ = get_settings()
-        _auth_cache["client"] = create_client(url, anon)
+        _auth_cache["client"] = create_client(url, anon).auth
     return _auth_cache["client"]
 
 

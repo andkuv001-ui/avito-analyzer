@@ -392,3 +392,28 @@ def test_missing_env_raises_not_configured(monkeypatch):
     sb_store.reset_clients()
     with pytest.raises(SupabaseNotConfigured):
         sb_store.get_auth_client()
+
+
+def test_get_auth_client_returns_gotrue_not_full_client(monkeypatch):
+    """get_auth_client должен возвращать client.auth (у Client нет sign_up)."""
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service")
+
+    class FakeGoTrue:
+        def sign_up(self, credentials):  # pragma: no cover - только атрибут
+            return None
+
+    class FakeClient:
+        auth = FakeGoTrue()
+
+    import supabase
+
+    monkeypatch.setattr(supabase, "create_client", lambda url, key: FakeClient())
+    sb_store.reset_clients()
+    try:
+        client = sb_store.get_auth_client()
+        assert hasattr(client, "sign_up")
+        assert not hasattr(client, "table")
+    finally:
+        sb_store.reset_clients()
