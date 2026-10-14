@@ -2,6 +2,7 @@ import pytest
 
 from src import llm
 from src.llm import (
+    DECISION_MARKER,
     GROUNDING_WARNING_PREFIX,
     HYPOTHESIS_MARKER,
     normalize_numbers,
@@ -15,6 +16,10 @@ def _hypo(n: int, basis: str = "всего 12 объявлений", check: str 
     return f"**Гипотеза {n}: утверждение** — Основание: {basis}; Проверка: {check}."
 
 
+def _verdict(text: str = "**Вердикт:** ВХОДИТЬ — всего 12 объявлений.") -> str:
+    return text
+
+
 def _conclusion(point7: str = "сделать X, основание 12, эффект 70.0%",
                 points_format: str = ")") -> str:
     points = [f"{i}{points_format} пункт с цифрой 12." for i in range(1, 7)]
@@ -22,14 +27,16 @@ def _conclusion(point7: str = "сделать X, основание 12, эффе
     return "\n".join(points)
 
 
-def _report(hypotheses: list[str] | None = None, conclusion: str | None = None,
-            section_9: bool = True, section_10: bool = True) -> str:
+def _report(hypotheses: list[str] | None = None, verdict: str | None = None,
+            conclusion: str | None = None, section_8: bool = True,
+            section_9: bool = True) -> str:
     hypotheses = hypotheses if hypotheses is not None else [_hypo(i) for i in range(1, 6)]
     parts = ["# Аналитический отчёт по выдаче Avito", "", "## 1. Обзор выдачи", "", "текст."]
+    if section_8:
+        parts += ["", "## 8. Гипотезы", "", "\n".join(hypotheses)]
     if section_9:
-        parts += ["", "## 9. Гипотезы", "", "\n".join(hypotheses)]
-    if section_10:
-        parts += ["", "## 10. Вывод и рекомендации", "",
+        parts += ["", "## 9. Решение о входе", "",
+                  verdict if verdict is not None else _verdict(), "",
                   conclusion if conclusion is not None else _conclusion()]
     return "\n".join(parts)
 
@@ -59,13 +66,13 @@ def test_normalize_numbers_from_digest_format():
     assert normalize_numbers(DIGEST) >= {12.0, 3.0, 8.0, 10.0, 70.0, 1200.0}
 
 
-# --- секция 9 --------------------------------------------------------------
+# --- секция 8 (гипотезы) ---------------------------------------------------
 
 
 def test_missing_sections_are_violations():
     violations = validate_grounding("## 1. Обзор\n\nтекст", DIGEST)
+    assert any("нет секции 8" in v for v in violations)
     assert any("нет секции 9" in v for v in violations)
-    assert any("нет секции 10" in v for v in violations)
 
 
 def test_hypothesis_count_below_5():
@@ -124,7 +131,27 @@ def test_hypothesis_bad_formatting_is_violation():
     assert any("оформлена не по шаблону" in v for v in violations)
 
 
-# --- секция 10 -------------------------------------------------------------
+# --- секция 9 (решение о входе) --------------------------------------------
+
+
+def test_verdict_missing_is_violation():
+    violations = validate_grounding(_report(verdict="Абзац без вердикта."), DIGEST)
+    assert any("нет блока вердикта" in v for v in violations)
+
+
+def test_verdict_without_digest_digit_is_violation():
+    verdict = "**Вердикт:** ВХОДИТЬ — цифра 987654 в основании."
+    violations = validate_grounding(_report(verdict=verdict), DIGEST)
+    assert any("вердикт не подкреплён цифрой" in v for v in violations)
+
+
+def test_verdict_with_decision_marker_passes():
+    verdict = f"**Вердикт:** {DECISION_MARKER}"
+    assert validate_grounding(_report(verdict=verdict), DIGEST) == []
+
+
+def test_verdict_with_digest_digit_passes():
+    assert validate_grounding(_report(verdict=_verdict()), DIGEST) == []
 
 
 def test_conclusion_without_seventh_point():
@@ -155,7 +182,7 @@ def test_point_7_without_digest_digit():
     violations = validate_grounding(
         _report(conclusion=_conclusion(point7="сделать X, основание 987654")), DIGEST
     )
-    assert any("п.10.7" in v for v in violations)
+    assert any("п.9.7" in v for v in violations)
 
 
 def test_point_7_with_marker_passes():

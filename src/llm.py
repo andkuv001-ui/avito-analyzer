@@ -15,7 +15,8 @@ DESCRIPTION_LIMIT = 1500
 
 NO_DATA_MARKER = "[НЕТ ДАННЫХ]"
 HYPOTHESIS_MARKER = "[НЕДОСТАТОЧНО ДАННЫХ ДЛЯ ГИПОТЕЗ]"
-GROUNDING_MARKERS = (NO_DATA_MARKER, HYPOTHESIS_MARKER, NO_FRESHNESS)
+DECISION_MARKER = "[НЕДОСТАТОЧНО ДАННЫХ ДЛЯ РЕШЕНИЯ]"
+GROUNDING_MARKERS = (NO_DATA_MARKER, HYPOTHESIS_MARKER, NO_FRESHNESS, DECISION_MARKER)
 MIN_HYPOTHESES = 5
 MAX_HYPOTHESES = 10
 CONCLUSION_POINTS = 7
@@ -220,7 +221,7 @@ def build_system_prompt(niche: str, region: str, prompt_template: str) -> str:
     )
 
 
-# --- Валидация привязки секций 9–10 к данным (Grounding) -------------------
+# --- Валидация привязки секций 8–9 к данным (Grounding) -------------------
 
 # Разряды через пробел/nbsp: «1 200» → «1200», «12 345 678» → «12345678».
 # Группа справа ровно 3 цифры, иначе это два отдельных числа («10 15»).
@@ -228,8 +229,8 @@ _THOUSANDS_SEP_RE = re.compile(r"(?<=\d)[\s  ](?=\d{3}(?!\d))")
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
 
 _RE_SECTION_1 = re.compile(r"^#+\s*1[\.\s]", flags=re.MULTILINE)
-_RE_SECTION_9 = re.compile(r"^##\s*9(?:[.:]|\s)", flags=re.MULTILINE)
-_RE_SECTION_10 = re.compile(r"^##\s*10[.:]", flags=re.MULTILINE)
+_RE_SECTION_8 = re.compile(r"^##\s*8(?:[.:]|\s)", flags=re.MULTILINE)
+_RE_SECTION_9 = re.compile(r"^##\s*9[.:]", flags=re.MULTILINE)
 _RE_HYP_HEADER = re.compile(r"^\*\*Гипотеза\s+(\d+):", flags=re.MULTILINE)
 _RE_HYP_ANY = re.compile(r"Гипотеза\s*\d+")
 _RE_HYP_LINE = re.compile(r"^\*\*Гипотеза\s+\d+:")
@@ -262,28 +263,37 @@ def _slice_blocks(body: str, headers: list) -> list[str]:
     return blocks
 
 
+def _body_after_header(text: str, header) -> str:
+    """Текст секции после заголовка, без остатка строки заголовка («## 9.» + название)."""
+    rest = text[header.end():]
+    newline = rest.find("\n")
+    return rest[newline:] if newline != -1 else ""
+
+
 def validate_grounding(text: str, digest_text: str) -> list[str]:
-    """Проверка секций 9 и 10 по политике Grounding. Пустой список = OK."""
+    """Проверка секций 8 и 9 по политике Grounding. Пустой список = OK."""
     violations: list[str] = []
     digest_tokens = normalize_numbers(digest_text)
 
+    section_8 = _RE_SECTION_8.search(text)
     section_9 = _RE_SECTION_9.search(text)
-    section_10 = _RE_SECTION_10.search(text)
+
+    if section_8 is None:
+        violations.append("нет секции 8 «Гипотезы» (заголовок вида «## 8. Гипотезы»)")
+    elif section_9 is not None and section_8.start() > section_9.start():
+        violations.append("секция 8 идёт после секции 9 — нарушена структура отчёта")
+        section_8 = None
 
     if section_9 is None:
-        violations.append("нет секции 9 «Гипотезы» (заголовок вида «## 9. Гипотезы»)")
-    elif section_10 is not None and section_9.start() > section_10.start():
-        violations.append("секция 9 идёт после секции 10 — нарушена структура отчёта")
-        section_9 = None
-
-    if section_10 is None:
-        violations.append("нет секции 10 «Вывод и рекомендации» (заголовок вида «## 10. Вывод и рекомендации»)")
+        violations.append(
+            "нет секции 9 «Решение о входе» (заголовок вида «## 9. Решение о входе»)"
+        )
         return violations
 
-    if section_9 is not None:
-        body_9 = text[section_9.end():section_10.start()]
-        headers = list(_RE_HYP_HEADER.finditer(body_9))
-        for line in body_9.splitlines():
+    if section_8 is not None:
+        body_8 = _body_after_header(text[:section_9.start()], section_8)
+        headers = list(_RE_HYP_HEADER.finditer(body_8))
+        for line in body_8.splitlines():
             if _RE_HYP_ANY.search(line) and not _RE_HYP_LINE.match(line):
                 violations.append(
                     "гипотеза оформлена не по шаблону (нужен заголовок вида «**Гипотеза N: …**»): "
@@ -292,7 +302,7 @@ def validate_grounding(text: str, digest_text: str) -> list[str]:
         count = len(headers)
         if count < MIN_HYPOTHESES or count > MAX_HYPOTHESES:
             violations.append(f"гипотез: {count} — требуется от {MIN_HYPOTHESES} до {MAX_HYPOTHESES}")
-        for header, block in zip(headers, _slice_blocks(body_9, headers)):
+        for header, block in zip(headers, _slice_blocks(body_8, headers)):
             label = f"гипотеза {header.group(1)}"
             if "Основание" not in block:
                 violations.append(f"{label}: нет подстроки «Основание»")
@@ -306,22 +316,37 @@ def validate_grounding(text: str, digest_text: str) -> list[str]:
             elif not (tokens & digest_tokens):
                 violations.append(f"{label}: цифры не встречаются в дайджесте — нет цитаты из данных")
 
-    body_10 = text[section_10.end():]
-    bad_points = _RE_POINT_BAD.findall(body_10)
+    body_9 = _body_after_header(text, section_9)
+    points = list(_RE_POINT.finditer(body_9))
+
+    # Блок вердикта — текст до первого пункта «N)».
+    verdict_block = body_9[:points[0].start()] if points else body_9
+    if not verdict_block.strip().startswith("**Вердикт:"):
+        violations.append(
+            "§9: нет блока вердикта — первая строка секции должна начинаться с «**Вердикт:** …»"
+        )
+    elif DECISION_MARKER not in verdict_block:
+        verdict_tokens = normalize_numbers(verdict_block)
+        if not (verdict_tokens & digest_tokens):
+            violations.append(
+                "п.9: вердикт не подкреплён цифрой из дайджеста и нет маркера "
+                f"«{DECISION_MARKER}»"
+            )
+
+    bad_points = _RE_POINT_BAD.findall(body_9)
     if bad_points:
         violations.append(
-            "пункты §10 оформлены точкой вместо скобки ("
+            "пункты §9 оформлены точкой вместо скобки ("
             + ", ".join(f"«{p}.»" for p in bad_points)
             + ") — нужна нумерация 1)…7)"
         )
-    points = list(_RE_POINT.finditer(body_10))
     numbers = [int(p.group(1)) for p in points]
     if numbers != list(range(1, CONCLUSION_POINTS + 1)):
         violations.append(
-            f"§10: найдены пункты {numbers or '—'} — требуется ровно {CONCLUSION_POINTS} "
+            f"§9: найдены пункты {numbers or '—'} — требуется ровно {CONCLUSION_POINTS} "
             f"пунктов нумерацией 1)–{CONCLUSION_POINTS})"
         )
-    for point, body in zip(points, _slice_blocks(body_10, points)):
+    for point, body in zip(points, _slice_blocks(body_9, points)):
         number = int(point.group(1))
         if not 1 <= number <= CONCLUSION_POINTS:
             continue
@@ -330,10 +355,10 @@ def validate_grounding(text: str, digest_text: str) -> list[str]:
         tokens = normalize_numbers(body)
         if number < CONCLUSION_POINTS:
             if not tokens:
-                violations.append(f"п.10.{number}: нет цифры и нет маркера данных")
+                violations.append(f"п.9.{number}: нет цифры и нет маркера данных")
         elif not (tokens & digest_tokens):
             violations.append(
-                "п.10.7: действие не подкреплено цифрой из дайджеста и нет маркера данных"
+                "п.9.7: действие не подкреплено цифрой из дайджеста и нет маркера данных"
             )
 
     return violations
@@ -343,7 +368,7 @@ def _grounding_feedback(violations: list[str]) -> str:
     return (
         "\n\nПРЕДЫДУЩИЙ ОТВЕТ НЕ ПРОШЁЛ ПРОВЕРКУ НА ПРИВЯЗКУ К ДАННЫМ:\n"
         + "\n".join(f"- {v}" for v in violations)
-        + "\nИсправь отчёт: соблюдай строгий формат секций 9 и 10 и цитируй цифры из дайджеста."
+        + "\nИсправь отчёт: соблюдай строгий формат секций 8 и 9 и цитируй цифры из дайджеста."
     )
 
 
@@ -353,9 +378,9 @@ def _has_section_one(text: str) -> bool:
 
 def generate_report(system_prompt: str, digest_text: str,
                     model: str | None = None) -> tuple[str, str | None]:
-    """Стадия B: финальный Markdown-отчёт (секции 1–10) + предупреждение Grounding.
+    """Стадия B: финальный Markdown-отчёт (секции 1–9) + предупреждение Grounding.
 
-    Один повторный вызов с feedback при нарушениях секций 9–10; после повторного
+    Один повторный вызов с feedback при нарушениях секций 8–9; после повторного
     провала текст принимается, warning сообщает о непройденной проверке.
     """
     resolved_model = config.get_model(model)

@@ -68,13 +68,13 @@ def test_demand_map_row_without_tags():
 
 
 def _stage_b_text():
-    sections = "\n".join(f"## {i}. Раздел {i}\n\nтекст раздела {i}." for i in range(1, 11))
-    sections = sections.replace("## 8. Раздел 8",
-                                "## 8. Карта спроса\n\nВводный абзац.\n\n" + DEMAND_MAP_PLACEHOLDER)
+    sections = "\n".join(f"## {i}. Раздел {i}\n\nтекст раздела {i}." for i in range(1, 10))
+    sections = sections.replace("## 7. Раздел 7",
+                                "## 7. Карта спроса\n\nВводный абзац.\n\n" + DEMAND_MAP_PLACEHOLDER)
     return "# Аналитический отчёт по выдаче Avito\n\n" + sections
 
 
-def test_assemble_report_has_sections_1_10_and_table():
+def test_assemble_report_has_sections_1_9_and_table():
     listings = [_listing(1, FRESH), _listing(2, STALE)]
     table = build_demand_map_table(_classifications(), listings)
     report = assemble_report(_stage_b_text(), table,
@@ -82,7 +82,7 @@ def test_assemble_report_has_sections_1_10_and_table():
                              total=3, model="openai/gpt-4o-mini", generated_at=REF,
                              parsed_at=datetime(2026, 10, 1, 18, 5))
 
-    for i in range(1, 11):
+    for i in range(1, 10):
         assert f"## {i}." in report
     assert DEMAND_MAP_PLACEHOLDER not in report
     assert "| Кластер | Тип | свежее | старое |" in report
@@ -92,25 +92,25 @@ def test_assemble_report_has_sections_1_10_and_table():
     assert "01.10.2026 18:05" in report
 
 
-def test_assemble_report_inserts_after_section_8_without_placeholder():
+def test_assemble_report_inserts_after_section_7_without_placeholder():
     stage_b = "# Заголовок\n\n" + "\n\n".join(
-        f"## {i}. Раздел {i}\n\nтекст" for i in range(1, 11)
+        f"## {i}. Раздел {i}\n\nтекст" for i in range(1, 10)
     )
     table = "| Кластер | Тип | свежее | старое | ИТОГО |\n|---|---|---:|---:|---:|"
     report = assemble_report(stage_b, table, niche="товар", region="СПб",
                              total=1, model="m", generated_at=REF)
     assert "| Кластер | Тип |" in report
-    section9 = report.index("## 9.")
-    assert report.index("| Кластер | Тип |") < section9
+    section8 = report.index("## 8.")
+    assert report.index("| Кластер | Тип |") < section8
 
 
-def test_assemble_report_appends_when_no_section_8():
+def test_assemble_report_appends_when_no_section_7():
     stage_b = "# Заголовок\n\n## 1. Раздел 1\n\nтекст"
     table = "| Кластер | Тип | ИТОГО |\n|---|---|---:|"
     report = assemble_report(stage_b, table, niche="товар", region="СПб",
                              total=1, model="m", generated_at=REF)
-    assert "## 8. Карта спроса" in report
-    assert report.index("## 8. Карта спроса") > report.index("## 1.")
+    assert "## 7. Карта спроса" in report
+    assert report.index("## 7. Карта спроса") > report.index("## 1.")
 
 
 def test_report_filename():

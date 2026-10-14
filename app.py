@@ -94,7 +94,7 @@ with st.sidebar:
 st.title("Анализ поисковой выдачи Avito")
 st.caption(
     "Excel-выгрузка → метрики и бакеты свежести (код) → кластеризация спроса (LLM) "
-    "→ Markdown-отчёт с секциями 1–10."
+    "→ Markdown-отчёт с секциями 1–9."
 )
 
 uploaded = st.file_uploader("Excel-файл выгрузки (.xlsx)", type=["xlsx", "xlsm"])

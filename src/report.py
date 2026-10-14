@@ -58,12 +58,12 @@ def _insert_demand_map(stage_b_md: str, table_md: str) -> str:
     if DEMAND_MAP_PLACEHOLDER in stage_b_md:
         return stage_b_md.replace(DEMAND_MAP_PLACEHOLDER, table_md, 1)
 
-    match = re.search(r"^(#{2,3}\s*8[\.:].*)$", stage_b_md, flags=re.MULTILINE)
+    match = re.search(r"^(#{2,3}\s*7[\.:].*)$", stage_b_md, flags=re.MULTILINE)
     if match:
         insert_at = match.end()
         return stage_b_md[:insert_at] + "\n\n" + table_md + stage_b_md[insert_at:]
 
-    return stage_b_md.rstrip() + f"\n\n## 8. Карта спроса\n\n{table_md}\n"
+    return stage_b_md.rstrip() + f"\n\n## 7. Карта спроса\n\n{table_md}\n"
 
 
 def meta_block(niche: str, region: str, total: int, model: str,
