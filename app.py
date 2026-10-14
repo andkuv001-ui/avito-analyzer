@@ -1,16 +1,30 @@
 import hashlib
 import io
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 
 import pandas as pd
 import streamlit as st
 
 from src import config
+from src import session as sess
 from src.digest import build_digest
+from src.docx_export import DocxError, report_to_docx
 from src.llm import LLMError, build_system_prompt, classify_listings, generate_report
 from src.metrics import build_summary, compute_listing_metrics
 from src.parse_excel import parse_workbook
 from src.report import assemble_report, build_demand_map_table, report_filename
+from src.sb_store import (
+    StorageError,
+    consume_quota,
+    download_xlsx,
+    get_quota,
+    list_reports,
+    save_report,
+    sign_in,
+    sign_out,
+    sign_up,
+    verify_token,
+)
 
 st.set_page_config(page_title="Avito SERP Analyzer", page_icon="📊", layout="wide")
 
@@ -54,42 +68,243 @@ def _load_prompt() -> str:
     return PROMPT_PATH.read_text(encoding="utf-8")
 
 
+@st.cache_data(show_spinner=False)
+def _docx_bytes(report_md: str, title: str, niche: str, region: str) -> bytes:
+    return report_to_docx(report_md, title, niche=niche, region=region)
+
+
 def _render_report(result: dict):
     st.success("Отчёт готов.")
     if result.get("warning"):
         st.warning(result["warning"])
     st.markdown(result["report"])
-    st.download_button(
-        "Скачать отчёт (.md)",
-        data=result["report"],
-        file_name=result["filename"],
-        mime="text/markdown",
+    md_name = result["filename"]
+    docx_name = md_name[:-3] + ".docx" if md_name.endswith(".md") else md_name + ".docx"
+    col_md, col_docx = st.columns(2)
+    with col_md:
+        st.download_button(
+            "Скачать отчёт (.md)",
+            data=result["report"],
+            file_name=md_name,
+            mime="text/markdown",
+            use_container_width=True,
+        )
+    with col_docx:
+        try:
+            docx = _docx_bytes(
+                result["report"], "Avito SERP Analyzer",
+                result.get("niche", ""), result.get("region", ""),
+            )
+        except DocxError as exc:
+            st.error(str(exc))
+        else:
+            st.download_button(
+                "Скачать отчёт (.docx)",
+                data=docx,
+                file_name=docx_name,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+
+
+def _logout():
+    session = sess.normalize_session(st.session_state.get("sb_session"))
+    if session:
+        sign_out(session["access_token"])
+    st.session_state.pop("sb_session", None)
+    st.session_state.pop("results", None)
+    st.session_state.pop("stage_a_cache", None)
+    st.rerun()
+
+
+def _current_session() -> dict | None:
+    """Проверка токена при каждом запуске скрипта; невалиден → выход."""
+    session = sess.normalize_session(st.session_state.get("sb_session"))
+    if session is None:
+        st.session_state.pop("sb_session", None)
+        return None
+    try:
+        user = verify_token(session["access_token"])
+    except StorageError as exc:
+        st.error(str(exc))
+        if st.button("Выйти"):
+            _logout()
+        st.stop()
+    if user is None:
+        st.session_state.pop("sb_session", None)
+        return None
+    session["user_id"] = getattr(user, "id", None) or session["user_id"]
+    session["email"] = getattr(user, "email", None) or session["email"]
+    st.session_state["sb_session"] = session
+    return session
+
+
+def _render_auth_gate():
+    st.title("Вход / Регистрация")
+    st.caption("Аккаунт хранит историю отчётов, Excel-файлы и квоту анализов.")
+    tab_in, tab_up = st.tabs(["Вход", "Регистрация"])
+
+    with tab_in:
+        email = st.text_input("Email", key="auth_login_email")
+        password = st.text_input("Пароль", type="password", key="auth_login_password")
+        if st.button("Войти", type="primary", disabled=not (email.strip() and password)):
+            try:
+                sb_session, user = sign_in(email.strip(), password)
+            except StorageError as exc:
+                st.error(str(exc))
+            else:
+                st.session_state["sb_session"] = {
+                    "access_token": sb_session.access_token,
+                    "user_id": user.id,
+                    "email": user.email,
+                }
+                st.rerun()
+
+    with tab_up:
+        email = st.text_input("Email", key="auth_reg_email")
+        password = st.text_input("Пароль (минимум 6 символов)", type="password",
+                                 key="auth_reg_password")
+        repeat = st.text_input("Повторите пароль", type="password", key="auth_reg_repeat")
+        st.caption("После регистрации подтвердите email по ссылке из письма — "
+                   "без подтверждения вход невозможен.")
+        if st.button("Зарегистрироваться", disabled=not (email.strip() and password)):
+            if len(password) < 6:
+                st.error("Пароль слишком короткий — минимум 6 символов.")
+            elif password != repeat:
+                st.error("Пароли не совпадают.")
+            else:
+                try:
+                    sign_up(email.strip(), password)
+                except StorageError as exc:
+                    st.error(str(exc))
+                else:
+                    st.success("Аккаунт создан. Подтвердите email по ссылке из письма "
+                               "и войдите на вкладке «Вход».")
+
+
+def _persist_report(user_id: str, niche: str, region: str, file_name: str,
+                    report_md: str, status: str, warning: str | None,
+                    xlsx_bytes: bytes):
+    try:
+        save_report(
+            user_id=user_id,
+            niche=niche,
+            region=region,
+            model=config.get_model(),
+            file_name=file_name,
+            report_md=report_md,
+            xlsx_bytes=xlsx_bytes,
+            status=status,
+            warning=warning,
+        )
+    except StorageError as exc:
+        st.error(f"Отчёт сформирован, но не сохранён в истории: {exc}")
+
+
+def _render_history(user_id: str):
+    st.subheader("Мои отчёты")
+    try:
+        reports = list_reports(user_id)
+    except StorageError as exc:
+        st.error(str(exc))
+        return
+    if not reports:
+        st.info("Отчётов пока нет — запустите анализ на вкладке «Анализ».")
+        return
+
+    st.dataframe(
+        pd.DataFrame(sess.report_table_rows(reports)),
         use_container_width=True,
+        hide_index=True,
     )
 
+    labels = [sess.report_label(r) for r in reports]
+    selected = st.selectbox("Отчёт", labels)
+    report = reports[labels.index(selected)]
+
+    if report.get("report_md"):
+        st.markdown(report["report_md"])
+    else:
+        st.info("Отчёт не сформирован (LLM завершился ошибкой) — Markdown не сохранён.")
+
+    cols = st.columns(3)
+    report_md = report.get("report_md") or ""
+    file_name = report.get("file_name") or ""
+    if report_md:
+        md_name = file_name or report_filename(report.get("niche") or "report")
+        docx_name = md_name[:-3] + ".docx" if md_name.endswith(".md") else md_name + ".docx"
+        with cols[0]:
+            st.download_button(
+                "Скачать .md", data=report_md, file_name=md_name,
+                mime="text/markdown", use_container_width=True,
+            )
+        with cols[1]:
+            try:
+                docx = _docx_bytes(
+                    report_md, "Avito SERP Analyzer",
+                    report.get("niche") or "", report.get("region") or "",
+                )
+            except DocxError as exc:
+                st.error(str(exc))
+            else:
+                st.download_button(
+                    "Скачать .docx", data=docx, file_name=docx_name,
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True,
+                )
+    if report.get("file_path"):
+        with cols[2]:
+            try:
+                xlsx = download_xlsx(user_id, report["id"])
+            except StorageError as exc:
+                st.error(str(exc))
+            else:
+                st.download_button(
+                    "Скачать Excel", data=xlsx,
+                    file_name=file_name or "upload.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+
+
+session = _current_session()
+if session is None:
+    _render_auth_gate()
+    st.stop()
+user_id = session["user_id"]
 
 with st.sidebar:
     st.title("📊 Avito Analyzer")
-    api_key = config.get_api_key()
-    st.caption(f"API key: {config.mask_key(api_key)}")
-    st.caption(f"Base URL: {config.get_base_url()}")
+    st.caption(session.get("email") or "")
+    try:
+        used, quota = get_quota(user_id)
+    except StorageError as exc:
+        st.caption(f"Лимит: {exc}")
+    else:
+        st.caption(f"Отчёты: {sess.format_quota(used, quota)}")
+    page = st.radio("Раздел", ["Анализ", "Мои отчёты"], horizontal=True)
+    if st.button("Выйти", use_container_width=True):
+        _logout()
     st.divider()
-    niche = st.text_input("Ниша / товар", placeholder="например: кактусы в горшках")
-    region = st.text_input("Регион", placeholder="например: Москва")
-    with st.expander("Дополнительно"):
-        export_date = st.date_input(
-            "Дата выгрузки (reference-now)",
-            value=None,
-            help="Если не указана — берётся текущие дата и время.",
-        )
-        model_override = st.text_input(
-            "Модель LLM",
-            value="",
-            placeholder=config.DEFAULT_MODEL,
-            help="Пусто — значение из LLM_MODEL",
-        )
-    if not api_key:
-        st.warning("Не задан ROUTERAI_API_KEY — анализ не запустится.")
+
+    if page == "Анализ":
+        niche = st.text_input("Ниша / товар", placeholder="например: кактусы в горшках")
+        region = st.text_input("Регион", placeholder="например: Москва")
+        with st.expander("Дополнительно"):
+            export_date = st.date_input(
+                "Дата выгрузки (reference-now)",
+                value=None,
+                help="Если не указана — берётся текущие дата и время.",
+            )
+        api_key = config.get_api_key()
+        st.caption(f"API key: {config.mask_key(api_key)}")
+        st.caption(f"Base URL: {config.get_base_url()}")
+        if not api_key:
+            st.warning("Не задан ROUTERAI_API_KEY — анализ не запустится.")
+
+if page == "Мои отчёты":
+    _render_history(user_id)
+    st.stop()
 
 st.title("Анализ поисковой выдачи Avito")
 st.caption(
@@ -144,14 +359,20 @@ if records:
 
 st.divider()
 
-run = st.button("Анализ", type="primary", disabled=not (niche.strip() and region.strip() and api_key))
+api_key = config.get_api_key()
+force_run = bool(st.session_state.pop("force_run", False)) and bool(
+    niche.strip() and region.strip() and api_key
+)
+run = st.button("Анализ", type="primary",
+                disabled=not (niche.strip() and region.strip() and api_key)) or force_run
 if not (niche.strip() and region.strip()):
     st.caption("Укажите нишу и регион в боковой панели.")
 elif not api_key:
     st.caption("Задайте ROUTERAI_API_KEY для запуска анализа.")
 
+resolved_model = config.get_model()
 result_key = "|".join([
-    file_hash, niche.strip(), region.strip(), config.get_model(model_override),
+    file_hash, niche.strip(), region.strip(), resolved_model,
     str(export_date or "now"),
 ])
 results: dict = st.session_state.setdefault("results", {})
@@ -161,10 +382,20 @@ if run or (result_key in results):
     if result_key in results:
         _render_report(results[result_key])
     else:
+        try:
+            quota_ok = consume_quota(user_id)
+        except StorageError as exc:
+            st.error(str(exc))
+            st.stop()
+        if not quota_ok:
+            st.error(sess.quota_exceeded_message())
+            st.stop()
+
         reference_now = _reference_now(export_date)
         progress = st.progress(0.0, text="Парсинг и метрики…")
         status = st.empty()
         stage_key = None
+        file_name = report_filename(niche.strip())
 
         try:
             listings = [compute_listing_metrics(r, reference_now) for r in records]
@@ -176,7 +407,7 @@ if run or (result_key in results):
             )
 
             status.info("Стадия A — кластеризация объявлений (LLM)…")
-            stage_key = f"{file_hash}|{config.get_model(model_override)}"
+            stage_key = f"{file_hash}|{resolved_model}"
             if stage_key in stage_a_cache:
                 classifications = stage_a_cache[stage_key]
                 progress.progress(0.55, text="Стадия A — из кэша")
@@ -186,7 +417,7 @@ if run or (result_key in results):
                                       text=f"Стадия A: чанк {done}/{total}")
 
                 classifications, stage_a_error = classify_listings(
-                    listings, model=model_override, progress=stage_a_progress
+                    listings, progress=stage_a_progress
                 )
                 if classifications is not None:
                     stage_a_cache[stage_key] = classifications
@@ -208,33 +439,42 @@ if run or (result_key in results):
             system_prompt = build_system_prompt(
                 niche.strip(), region.strip(), _load_prompt()
             )
-            stage_b_md, grounding_warning = generate_report(
-                system_prompt, digest_text, model=model_override
-            )
+            stage_b_md, grounding_warning = generate_report(system_prompt, digest_text)
             progress.progress(0.9, text="Сборка отчёта…")
 
             report_md = assemble_report(
                 stage_b_md, demand_map_md,
                 niche=niche.strip(), region=region.strip(),
-                total=len(listings), model=config.get_model(model_override),
+                total=len(listings), model=resolved_model,
                 parsed_at=parsed["parsed_at"],
             )
             results[result_key] = {
                 "report": report_md,
-                "filename": report_filename(niche.strip()),
+                "filename": file_name,
                 "warning": grounding_warning,
+                "niche": niche.strip(),
+                "region": region.strip(),
             }
             progress.progress(1.0, text="Готово")
             status.empty()
+            _persist_report(
+                user_id, niche.strip(), region.strip(), file_name,
+                report_md, "done", grounding_warning, file_bytes,
+            )
             _render_report(results[result_key])
 
         except LLMError as exc:
             progress.empty()
             status.empty()
+            _persist_report(
+                user_id, niche.strip(), region.strip(), file_name,
+                "", "failed", None, file_bytes,
+            )
             st.error(str(exc))
             if st.button("Повторить"):
                 if stage_key:
                     stage_a_cache.pop(stage_key, None)
+                st.session_state["force_run"] = True
                 st.rerun()
         except FileNotFoundError as exc:
             progress.empty()
