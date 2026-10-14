@@ -88,3 +88,74 @@ def test_digest_key_facts_reference_stage_a_names_not_numbers():
     text = _digest(None)
     for name in ("кластеры без свежих", "B2B-доля", "топ-5 запросов"):
         assert f"[{name}] [НЕТ ДАННЫХ]" in text
+
+
+# --- ценовая сегментация в таблицах дайджеста -------------------------------
+
+def _segment_listings(count: int = 9):
+    out = []
+    for i in range(count):
+        views = (i + 1) * 10
+        fresh = i % 2 == 0
+        out.append(compute_listing_metrics(_listing(
+            n=i + 1, title=f"объявление {i + 1}", price=float((i + 1) * 100),
+            views_today=views,
+            published_at=datetime(2026, 10, 1) if fresh else datetime(2026, 8, 1),
+            views_total=views * 2 if fresh else 5000), REF))
+    return out
+
+
+def _segment_classifications():
+    return {
+        i + 1: {"b2b": "B2C",
+                "clusters": [{"kind": "товарный", "tag": "мох" if i < 6 else "кактус"}],
+                "queries": [], "usp": None, "scenario": None}
+        for i in range(9)
+    }
+
+
+def _segment_digest(classifications=None):
+    listings = _segment_listings()
+    return build_digest(listings, build_summary(listings), "| карта спроса |",
+                        "мох", "Москва", REF,
+                        classifications=classifications or _segment_classifications())
+
+
+def test_digest_has_price_segment_tables():
+    text = _segment_digest()
+    assert "### Сегменты цены: дешёвые / средние / дорогие" in text
+    assert "Тертили по числовой цене: дешёвые ≤ 400 < средние ≤ 700 < дорогие" in text
+    assert "### Свежие vs старые внутри ценовых сегментов" in text
+    assert "### Цены по кластерам" in text
+    assert "| Сегмент | Объявлений | Цена min–med–max |" in text
+    assert "| Сегмент | N свежих |" in text
+    assert "| Тег | Тип | N | Медиана цены | «Просмотров сегодня» медиана |" in text
+    assert "| дешёвые | 4 | 100–250–400 | 25.0 | 0 |" in text
+    assert "| мох | товарный | 6 | 350 |" in text
+
+
+def test_digest_effectiveness_renamed_with_confound_note():
+    text = _segment_digest()
+    assert "### Эффективность свежих vs старых (без учёта цены)" in text
+    assert "конфаундится ценой — см. разрезы по сегментам" in text
+    assert "### Эффективность: что эффективнее" not in text
+
+
+def test_digest_segment_tables_no_data_for_small_base():
+    text = _digest(_classifications())
+    assert "Сегменты не считаются: с числовой ценой 2 (<9)" in text
+    assert "| дешёвые | [НЕТ ДАННЫХ] | [НЕТ ДАННЫХ] | [НЕТ ДАННЫХ] | [НЕТ ДАННЫХ] |" in text
+    assert "| дешёвые | [НЕТ ДАННЫХ] | [НЕТ ДАННЫХ] | [НЕТ ДАННЫХ] | [НЕТ ДАННЫХ] | " \
+           "[НЕТ ДАННЫХ] |" in text
+
+
+def test_digest_cluster_prices_without_classifications():
+    text = _digest(None)
+    assert "### Цены по кластерам" in text
+    assert "| [НЕТ ДАННЫХ] | — | — | — | — |" in text
+
+
+def test_digest_rules_mention_price_confounder():
+    text = _digest(_classifications())
+    assert "ЦЕНА — ГЛАВНЫЙ КОНФАУНДЕР" in text
+    assert "только ВНУТРИ ценовых сегментов" in text

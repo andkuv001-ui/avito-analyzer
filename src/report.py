@@ -3,53 +3,103 @@
 from __future__ import annotations
 
 import re
+import statistics
+from collections import Counter
 from datetime import datetime
 
 from .dates import NO_FRESHNESS
-from .metrics import FRESHNESS_CLASSES
+from .metrics import FRESHNESS_CLASSES, SEGMENT_LABELS, _fmt_int, price_segments
 
 DEMAND_MAP_PLACEHOLDER = "[ТАБЛИЦА КАРТЫ СПРОСА]"
 NO_DATA_LABEL = "[НЕТ ДАННЫХ]"
 
 
 def build_demand_map_table(classifications: dict[int, dict] | None, listings: list[dict]) -> str:
-    """Точная карта спроса: строки — кластеры из стадии A, столбцы — свежее/старое из кода."""
+    """Точная карта спроса: строки — кластеры из стадии A, столбцы — свежее/старое из кода
+    плюс ценовые столбцы (медиана цены и счётчики сегментов из price_segments)."""
     columns = FRESHNESS_CLASSES + [NO_FRESHNESS]
     counts: dict[tuple[str, str], int] = {}
     row_totals: dict[tuple[str, str], int] = {}
+    row_prices: dict[tuple[str, str], list[float]] = {}
+    row_segments: dict[tuple[str, str], Counter] = {}
 
-    def bump(row_key: tuple[str, str], klass: str):
+    segments = price_segments(listings)
+    segments_on = segments["границы"] is not None
+    segment_of: dict[int, str] = {}
+    if segments_on:
+        for label in SEGMENT_LABELS:
+            for record in segments[label]:
+                segment_of[record["n"]] = label
+
+    def bump(row_key: tuple[str, str], klass: str,
+             price: float | None = None, segment: str | None = None):
         counts[(row_key, klass)] = counts.get((row_key, klass), 0) + 1
         row_totals[row_key] = row_totals.get(row_key, 0) + 1
+        if price is not None:
+            row_prices.setdefault(row_key, []).append(price)
+        if segment is not None:
+            row_segments.setdefault(row_key, Counter())[segment] += 1
 
     if classifications is None:
         for record in listings:
-            bump((NO_DATA_LABEL, ""), record.get("freshness_class") or NO_FRESHNESS)
+            bump((NO_DATA_LABEL, ""), record.get("freshness_class") or NO_FRESHNESS,
+                 record.get("price"), segment_of.get(record["n"]))
     else:
         for record in listings:
             klass = record.get("freshness_class") or NO_FRESHNESS
+            price = record.get("price")
+            segment = segment_of.get(record["n"])
             clusters = (classifications.get(record["n"]) or {}).get("clusters") or []
             if not clusters:
-                bump(("(без тегов)", ""), klass)
+                bump(("(без тегов)", ""), klass, price, segment)
                 continue
             for cluster in clusters:
-                bump((cluster["tag"].strip(), cluster["kind"]), klass)
+                bump((cluster["tag"].strip(), cluster["kind"]), klass, price, segment)
 
     if not counts:
         return f"*{NO_DATA_LABEL}*"
 
-    header = "| Кластер | Тип | свежее | старое | " + NO_FRESHNESS + " | ИТОГО |"
-    sep = "|---|---|---:|---:|---:|---:|"
+    def price_cell(key: tuple[str, str]) -> str:
+        if not segments_on:
+            return NO_DATA_LABEL
+        prices = row_prices.get(key)
+        return _fmt_int(round(statistics.median(prices))) if prices else NO_DATA_LABEL
+
+    def segment_cells(key: tuple[str, str]) -> list[str]:
+        if not segments_on:
+            return [NO_DATA_LABEL] * len(SEGMENT_LABELS)
+        seg = row_segments.get(key, Counter())
+        return [str(seg.get(label, 0)) for label in SEGMENT_LABELS]
+
+    header = ("| Кластер | Тип | свежее | старое | " + NO_FRESHNESS +
+              " | цена медиана | " + " | ".join(SEGMENT_LABELS) + " | ИТОГО |")
+    sep = "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"
     rows = [header, sep]
 
     order = sorted(row_totals, key=lambda k: (-row_totals[k], k[0]))
     for key in order:
         tag, kind = key
         cells = [str(counts.get((key, col), 0)) for col in columns]
-        rows.append(f"| {tag} | {kind or '—'} | " + " | ".join(cells) + f" | {row_totals[key]} |")
+        rows.append(
+            f"| {tag} | {kind or '—'} | " + " | ".join(cells) +
+            f" | {price_cell(key)} | " + " | ".join(segment_cells(key)) +
+            f" | {row_totals[key]} |"
+        )
 
     col_totals = [sum(counts.get((k, col), 0) for k in row_totals) for col in columns]
+    all_prices = [l["price"] for l in listings if l.get("price") is not None]
+    total_price = (
+        _fmt_int(round(statistics.median(all_prices))) if segments_on else NO_DATA_LABEL
+    )
+    if segments_on:
+        total_segments = [
+            str(sum(row_segments.get(k, Counter()).get(label, 0) for k in row_totals))
+            for label in SEGMENT_LABELS
+        ]
+    else:
+        total_segments = [NO_DATA_LABEL] * len(SEGMENT_LABELS)
     rows.append("| **ИТОГО** | — | " + " | ".join(f"**{t}**" for t in col_totals)
+                + f" | **{total_price}** | " + " | ".join(f"**{t}**" for t in total_segments)
                 + f" | **{sum(row_totals.values())}** |")
     return "\n".join(rows)
 

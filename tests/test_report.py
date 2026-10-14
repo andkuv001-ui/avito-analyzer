@@ -118,3 +118,60 @@ def test_report_filename():
     assert name.startswith("avito_report_кактусы-в-горшках_20261001-1800")
     assert name.endswith(".md")
     assert report_filename("   ") .startswith("avito_report_report_")
+
+
+# --- ценовые столбцы карты спроса ------------------------------------------
+
+def _price_listing(n, klass, price):
+    return {"n": n, "freshness_class": klass, "price": price}
+
+
+def test_demand_map_price_columns_header():
+    listings = [_price_listing(1, FRESH, 100.0), _price_listing(2, STALE, 200.0)]
+    table = build_demand_map_table(_classifications(), listings)
+    header = table.splitlines()[0]
+    assert "| цена медиана | дешёвые | средние | дорогие | ИТОГО |" in header
+
+
+def test_demand_map_price_cells_no_data_below_min_base():
+    listings = [_price_listing(i, FRESH if i % 2 else STALE, float(i * 100))
+                for i in range(1, 9)]  # 8 с ценой <9
+    table = build_demand_map_table(_classifications(), listings)
+    rows = table.splitlines()
+    row = next(line for line in rows if line.startswith("| (без тегов)"))
+    cells = [c.strip() for c in row.split("|")]
+    assert cells[6] == "[НЕТ ДАННЫХ]"          # цена медиана
+    assert cells[7:10] == ["[НЕТ ДАННЫХ]"] * 3  # сегменты
+    total = rows[-1]
+    assert "[НЕТ ДАННЫХ]" in total
+
+
+def test_demand_map_segment_counters_and_total():
+    listings = [_price_listing(i, FRESH if i % 2 else STALE, float(i * 100))
+                for i in range(1, 10)]  # 100…900 → 4/3/2
+    classifications = {
+        i: {"clusters": [{"kind": "товарный", "tag": "товар"}], "b2b": "B2C",
+            "queries": [], "usp": None, "scenario": None}
+        for i in range(1, 10)
+    }
+    table = build_demand_map_table(classifications, listings)
+    lines = table.splitlines()
+    row = next(line for line in lines if line.startswith("| товар"))
+    cells = [c.strip() for c in row.split("|")]
+    assert cells[6] == "500"     # медиана цены
+    assert cells[7:10] == ["4", "3", "2"]
+    assert cells[10] == "9"
+    total = [c.strip() for c in lines[-1].split("|")]
+    assert total[6] == "**500**"
+    assert total[7:10] == ["**4**", "**3**", "**2**"]
+    assert total[10] == "**9**"
+
+
+def test_demand_map_fallback_with_prices_has_segment_counters():
+    listings = [_price_listing(i, FRESH, float(i * 100)) for i in range(1, 10)]
+    table = build_demand_map_table(None, listings)
+    lines = table.splitlines()
+    row = next(line for line in lines if line.startswith("| [НЕТ ДАННЫХ]"))
+    cells = [c.strip() for c in row.split("|")]
+    assert cells[6] == "500"
+    assert cells[7:10] == ["4", "3", "2"]

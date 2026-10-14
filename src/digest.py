@@ -5,7 +5,15 @@ from __future__ import annotations
 from datetime import datetime
 
 from .dates import NO_FRESHNESS
-from .metrics import FRESHNESS_CLASSES, build_fact_pack
+from .metrics import (
+    FRESHNESS_CLASSES,
+    NO_DATA,
+    SEGMENT_LABELS,
+    _fmt_int,
+    _ratio,
+    build_fact_pack,
+    cluster_price_stats,
+)
 
 FULL_DESCRIPTION_LIMIT = 50
 DESCRIPTION_CUTOFF = 2000
@@ -39,6 +47,12 @@ def rules(parsed_at: datetime) -> str:
   вне начала дня «просмотров сегодня» — неполный день).
 - «Просмотров всего» — НЕ показатель эффективности: накапливается за всю жизнь объявления,
   включая периоды до последнего продления.
+- ЦЕНА — ГЛАВНЫЙ КОНФАУНДЕР «Просмотров сегодня»: дешёвые объявления собирают больше
+  просмотров ВСЕГДА. Любые сравнения просмотров (свежие vs старые, promo, кластеры) —
+  только ВНУТРИ ценовых сегментов (дешёвые/средние/дорогие): границы тертилей и разрезы
+  даны кодом в таблицах «Сегменты цены» и «Свежие vs старые внутри ценовых сегментов».
+  Преимущество свежих/старых или promo, объяснённое только ценой, — НЕ преимущество
+  формата или продвижения.
 - Если данных нет — [НЕТ ДАННЫХ]; не выдумывай цифры. Нет даты —
   [НЕДОСТАТОЧНО ДАННЫХ ДЛЯ ОЦЕНКИ СВЕЖЕСТИ].
 """.strip()
@@ -126,7 +140,8 @@ def _format_record(record: dict, cutoff: int | None,
     ])
 
 
-def build_metrics_tables(summary: dict) -> str:
+def build_metrics_tables(summary: dict, listings: list[dict] | None = None,
+                         classifications: dict[int, dict] | None = None) -> str:
     lines = ["## Сводные метрики (считаны кодом, не LLM)", ""]
 
     lines.append("### Свежие vs старые (косвенная оценка)")
@@ -137,10 +152,11 @@ def build_metrics_tables(summary: dict) -> str:
     lines.append(f"| {NO_FRESHNESS} | {summary['class_counts'].get(NO_FRESHNESS, 0)} |")
     lines.append("")
 
-    lines.append("### Эффективность: что эффективнее — свежие или старые?")
+    lines.append("### Эффективность свежих vs старых (без учёта цены)")
     lines.append(
         "Метрика эффективности — «Просмотров сегодня» (на момент парсинга). "
-        "«Всего» — только для справки, это накопленная за всю жизнь цифра."
+        "«Всего» — только для справки, это накопленная за всю жизнь цифра. "
+        "Сравнение по всей выдаче конфаундится ценой — см. разрезы по сегментам."
     )
     lines.append("")
     lines.append("| Метрика | свежее | старое |")
@@ -158,6 +174,62 @@ def build_metrics_tables(summary: dict) -> str:
         f = stats.get(FRESHNESS_CLASSES[0], {}).get(key)
         s = stats.get(FRESHNESS_CLASSES[1], {}).get(key)
         lines.append(f"| {title} | {_fmt(f)} | {_fmt(s)} |")
+    lines.append("")
+
+    segments = summary["price_segments"]
+    lines.append("### Сегменты цены: дешёвые / средние / дорогие")
+    if segments["границы"] is None:
+        lines.append(
+            f"Сегменты не считаются: с числовой ценой {segments['база']} "
+            f"(<9); без числовой цены — {segments['без цены']}."
+        )
+    else:
+        p33, p66 = segments["границы"]
+        lines.append(
+            f"Тертили по числовой цене: дешёвые ≤ {_fmt_int(round(p33))} < средние "
+            f"≤ {_fmt_int(round(p66))} < дорогие; без числовой цены (в т.ч. «договорная») "
+            f"— {segments['без цены']}."
+        )
+    lines.append("| Сегмент | Объявлений | Цена min–med–max | «Просмотров сегодня» медиана "
+                 "| С платными услугами, % |")
+    lines.append("|---|---:|---:|---:|---:|")
+    for label in SEGMENT_LABELS:
+        seg = segments["segments"][label]
+        if seg["count"] is None:
+            lines.append(f"| {label} | {NO_DATA} | {NO_DATA} | {NO_DATA} | {NO_DATA} |")
+            continue
+        price_range = (
+            f"{_fmt_int(seg['price_min'])}–{_fmt_int(seg['price_median'])}–"
+            f"{_fmt_int(seg['price_max'])}"
+            if seg["price_min"] is not None else NO_DATA
+        )
+        lines.append(
+            f"| {label} | {seg['count']} | {price_range} | "
+            f"{_fmt(seg['views_today_median'])} | {_fmt(seg['promo_share'])} |"
+        )
+    lines.append("")
+
+    lines.append("### Свежие vs старые внутри ценовых сегментов")
+    lines.append(
+        "Контроль цены: цена — конфаундер просмотров, поэтому сравнение свежих и старых "
+        "даётся внутри каждого ценового сегмента."
+    )
+    lines.append("")
+    lines.append("| Сегмент | N свежих | Просмотров сегодня медиана (свежие) | N старых "
+                 "| Просмотров сегодня медиана (старые) | Отношение |")
+    lines.append("|---|---:|---:|---:|---:|---:|")
+    for label in SEGMENT_LABELS:
+        seg = segments["segments"][label]
+        if seg["count"] is None:
+            lines.append(f"| {label} | {NO_DATA} | {NO_DATA} | {NO_DATA} | {NO_DATA} | "
+                         f"{NO_DATA} |")
+            continue
+        fresh, stale = seg["fresh"], seg["stale"]
+        lines.append(
+            f"| {label} | {fresh['count']} | {_fmt(fresh['views_today_median'])} | "
+            f"{stale['count']} | {_fmt(stale['views_today_median'])} | "
+            f"{_ratio(fresh['views_today_median'], stale['views_today_median'])} |"
+        )
     lines.append("")
 
     lines.append("### Активность: Просмотров сегодня (главный сигнал, на момент парсинга)")
@@ -187,6 +259,22 @@ def build_metrics_tables(summary: dict) -> str:
         f"Всего с числовой ценой: {overall['count']}; договорная: {summary['price_negotiable']}; "
         f"диапазон: {summary['price_range']}."
     )
+    lines.append("")
+
+    lines.append("### Цены по кластерам")
+    cluster_rows = cluster_price_stats(listings or [], classifications)
+    if cluster_rows:
+        lines.append("| Тег | Тип | N | Медиана цены | «Просмотров сегодня» медиана |")
+        lines.append("|---|---|---:|---:|---:|")
+        for row in cluster_rows:
+            price_cell = _fmt_int(row["price_median"]) if row["price_median"] is not None \
+                else NO_DATA
+            lines.append(
+                f"| {row['tag']} | {row['kind'] or '—'} | {row['count']} | "
+                f"{price_cell} | {_fmt(row['views_today_median'])} |"
+            )
+    else:
+        lines.append(f"| {NO_DATA} | — | — | — | — |")
     lines.append("")
 
     lines.append("### Продвижение (Платные услуги)")
@@ -249,7 +337,7 @@ def build_digest(listings: list[dict], summary: dict, demand_map_md: str,
         "",
         *facts,
         "",
-        build_metrics_tables(summary),
+        build_metrics_tables(summary, listings, classifications),
         "## Карта спроса (счётчики посчитаны кодом; классы свежести — кодовые)",
         "",
         demand_map_md,

@@ -124,11 +124,15 @@ def _class_stats(items: list[dict]) -> dict:
 
 NO_DATA = "[НЕТ ДАННЫХ]"
 
+# Ценовые сегменты: тертили по числовой цене. <9 с ценой — сегменты не считаются.
+SEGMENT_LABELS = ("дешёвые", "средние", "дорогие")
+PRICE_SEGMENT_MIN_BASE = 9
+
 # Стабильные имена фактов: промпт и валидация Grounding ссылаются на них по имени.
 FACT_NAMES = (
     "объём", "классы", "нулевые просмотры", "концентрация топ-10",
     "promo-эффект", "свежие vs старые", "цена vs спрос", "продавцы",
-    "кластеры без свежих", "B2B-доля", "топ-5 запросов",
+    "кластеры без свежих", "B2B-доля", "топ-5 запросов", "цены по кластерам",
 )
 
 
@@ -152,6 +156,69 @@ def _ratio(numerator, denominator) -> str:
     return f"×{numerator / denominator:.1f}"
 
 
+def price_segments(listings: list[dict]) -> dict:
+    """Ценовые сегменты (тертили): дешёвые ≤ p33 < средние ≤ p66 < дорогие.
+
+    База — объявления с числовой `price` (включая диапазон с числом); «договорная»
+    и прочее без числа — вне сегментов, считаются в «без цены». Границы — значения
+    отсортированного массива по индексам третей (без интерполяции). Малая база
+    (<PRICE_SEGMENT_MIN_BASE) → «границы» None, все сегменты пустые.
+    """
+    priced = [l for l in listings if l.get("price") is not None]
+    result: dict = {
+        "границы": None,
+        "дешёвые": [],
+        "средние": [],
+        "дорогие": [],
+        "без цены": len(listings) - len(priced),
+    }
+    if len(priced) < PRICE_SEGMENT_MIN_BASE:
+        return result
+    prices = sorted(l["price"] for l in priced)
+    p33 = prices[len(prices) // 3]
+    p66 = prices[2 * len(prices) // 3]
+    result["границы"] = (p33, p66)
+    for record in priced:
+        if record["price"] <= p33:
+            result["дешёвые"].append(record)
+        elif record["price"] <= p66:
+            result["средние"].append(record)
+        else:
+            result["дорогие"].append(record)
+    return result
+
+
+def cluster_price_stats(listings: list[dict],
+                        classifications: dict[int, dict] | None) -> list[dict]:
+    """Строки «цен по кластерам»: top-10 тегов стадии A по N, медиана цены и просмотров."""
+    if classifications is None:
+        return []
+    per_tag: dict[str, dict] = {}
+    for l in listings:
+        for cluster in (classifications.get(l["n"]) or {}).get("clusters") or []:
+            tag = str(cluster.get("tag") or "").strip()
+            if not tag:
+                continue
+            entry = per_tag.setdefault(tag, {
+                "tag": tag,
+                "kind": str(cluster.get("kind") or "").strip(),
+                "count": 0,
+                "prices": [],
+                "views": [],
+            })
+            entry["count"] += 1
+            if l.get("price") is not None:
+                entry["prices"].append(l["price"])
+            if l.get("views_today") is not None:
+                entry["views"].append(l["views_today"])
+    rows = sorted(per_tag.values(), key=lambda r: (-r["count"], r["tag"]))[:10]
+    for row in rows:
+        row["price_median"] = round(statistics.median(row["prices"])) if row["prices"] else None
+        row["views_today_median"] = _median(row["views"])
+        del row["prices"], row["views"]
+    return rows
+
+
 def build_fact_pack(listings: list[dict], summary: dict,
                     classifications: dict[int, dict] | None) -> list[str]:
     """Детерминированные факты для секции «Ключевые факты» дайджеста.
@@ -168,6 +235,8 @@ def build_fact_pack(listings: list[dict], summary: dict,
 
     total = len(listings)
     facts: dict[str, str] = {}
+    segments = price_segments(listings)
+    segments_on = segments["границы"] is not None
 
     with_date = sum(1 for l in listings if l.get("published_at") is not None)
     facts["объём"] = (
@@ -211,16 +280,51 @@ def build_fact_pack(listings: list[dict], summary: dict,
     plain = [l for l in listings if not l.get("has_paid_services")]
     promo_median = _median([l["views_today"] for l in promo if l.get("views_today") is not None])
     plain_median = _median([l["views_today"] for l in plain if l.get("views_today") is not None])
+    promo_by_segment = []
+    for label in SEGMENT_LABELS:
+        items = segments[label] if segments_on else []
+        if not items:
+            promo_by_segment.append(f"{label} — {NO_DATA}")
+            continue
+        with_paid = [l for l in items if l.get("has_paid_services")]
+        without_paid = [l for l in items if not l.get("has_paid_services")]
+        with_median = _median([l["views_today"] for l in with_paid
+                               if l.get("views_today") is not None])
+        without_median = _median([l["views_today"] for l in without_paid
+                                  if l.get("views_today") is not None])
+        promo_by_segment.append(
+            f"{label} — с {_fmt_value(with_median)} ({len(with_paid)} шт.) / "
+            f"без {_fmt_value(without_median)} ({len(without_paid)} шт.), "
+            f"отношение {_ratio(with_median, without_median)}"
+        )
     facts["promo-эффект"] = (
-        f"медиана «Просмотров сегодня» с платными услугами — "
+        f"по всей выдаче: медиана «Просмотров сегодня» с платными услугами — "
         f"{_fmt_value(promo_median)} ({len(promo)} шт.), без — "
         f"{_fmt_value(plain_median)} ({len(plain)} шт.), отношение "
-        f"{_ratio(promo_median, plain_median)}"
+        f"{_ratio(promo_median, plain_median)}; внутри сегментов: "
+        + "; ".join(promo_by_segment)
     )
 
     fvs = summary["fresh_vs_stale"]
     fresh_stats = fvs.get(FRESH_LABEL, {})
     stale_stats = fvs.get(STALE_LABEL, {})
+    fresh_by_segment = []
+    for label in SEGMENT_LABELS:
+        items = segments[label] if segments_on else []
+        if not items:
+            fresh_by_segment.append(f"{label} — {NO_DATA}")
+            continue
+        fresh_items = [l for l in items if l.get("freshness_class") == FRESH_LABEL]
+        stale_items = [l for l in items if l.get("freshness_class") == STALE_LABEL]
+        fresh_median = _median([l["views_today"] for l in fresh_items
+                                if l.get("views_today") is not None])
+        stale_median = _median([l["views_today"] for l in stale_items
+                                if l.get("views_today") is not None])
+        fresh_by_segment.append(
+            f"{label} — свежее {_fmt_value(fresh_median)} ({len(fresh_items)} шт.), "
+            f"старое {_fmt_value(stale_median)} ({len(stale_items)} шт.), "
+            f"отношение {_ratio(fresh_median, stale_median)}"
+        )
     facts["свежие vs старые"] = (
         f"медиана «Просмотров сегодня»: свежее — "
         f"{_fmt_value(fresh_stats.get('views_today_median'))} "
@@ -228,32 +332,40 @@ def build_fact_pack(listings: list[dict], summary: dict,
         f"{_fmt_value(stale_stats.get('views_today_median'))} "
         f"({stale_stats.get('count', 0)} шт.), отношение "
         f"{_ratio(fresh_stats.get('views_today_median'), stale_stats.get('views_today_median'))}"
+        "; внутри ценовых сегментов: " + "; ".join(fresh_by_segment)
     )
 
     priced = [l for l in listings if l.get("price") is not None]
-    if priced:
-        prices = [l["price"] for l in priced]
-        price_median = statistics.median(prices)
-        price_part = (
-            f"медиана цены {_fmt_int(round(price_median))}, коридор "
-            f"{_fmt_int(round(min(prices)))}–{_fmt_int(round(max(prices)))}"
-        )
-        cheap = _median([l["views_today"] for l in priced
-                         if l["price"] <= price_median and l.get("views_today") is not None])
-        rich = _median([l["views_today"] for l in priced
-                        if l["price"] > price_median and l.get("views_today") is not None])
-        half_part = (
-            f"медиана «Просмотров сегодня» дешёвой половины — {_fmt_value(cheap)}, "
-            f"дорогой — {_fmt_value(rich)}, отношение {_ratio(cheap, rich)}"
+    overall = summary["price_overall"]
+    price_part = (
+        f"медиана цены {_fmt_int(overall['median'])}, коридор "
+        f"{_fmt_int(overall['min'])}–{_fmt_int(overall['max'])}"
+        if overall["count"] else NO_DATA
+    )
+    if segments_on:
+        p33, p66 = segments["границы"]
+        per_segment = []
+        for label in SEGMENT_LABELS:
+            items = segments[label]
+            median_views = _median([x["views_today"] for x in items
+                                    if x.get("views_today") is not None])
+            per_segment.append(
+                f"{label} — {len(items)} шт., медиана «Просмотров сегодня» "
+                f"{_fmt_value(median_views)}"
+            )
+        segment_part = (
+            f"границы тертилей {_fmt_int(round(p33))} / {_fmt_int(round(p66))}; "
+            + "; ".join(per_segment)
         )
     else:
-        price_part = NO_DATA
-        half_part = (
-            f"медиана «Просмотров сегодня» дешёвой половины — {NO_DATA}, "
-            f"дорогой — {NO_DATA}, отношение {NO_DATA}"
+        segment_part = (
+            f"сегменты не считаются — с числовой ценой {len(priced)} "
+            f"(<{PRICE_SEGMENT_MIN_BASE}); дешёвые — {NO_DATA}, средние — {NO_DATA}, "
+            f"дорогие — {NO_DATA}"
         )
     facts["цена vs спрос"] = (
-        f"{price_part}; «договорная» — {summary['price_negotiable']}; {half_part}"
+        f"{price_part}; {segment_part}; «договорная» — {summary['price_negotiable']}; "
+        f"без числовой цены — {segments['без цены']}"
     )
 
     sellers = summary["sellers"]
@@ -272,6 +384,7 @@ def build_fact_pack(listings: list[dict], summary: dict,
         facts["кластеры без свежих"] = NO_DATA
         facts["B2B-доля"] = NO_DATA
         facts["топ-5 запросов"] = NO_DATA
+        facts["цены по кластерам"] = NO_DATA
     else:
         per_tag: dict[str, list[int]] = {}
         for l in listings:
@@ -307,7 +420,50 @@ def build_fact_pack(listings: list[dict], summary: dict,
             if counter else NO_DATA
         )
 
+        cluster_prices = cluster_price_stats(listings, classifications)
+        if not cluster_prices or all(r["price_median"] is None for r in cluster_prices):
+            facts["цены по кластерам"] = NO_DATA
+        else:
+            facts["цены по кластерам"] = ", ".join(
+                f"{row['tag']} ({row['count']}): {_fmt_value(row['price_median'])}"
+                for row in cluster_prices
+            )
+
     return [f"[{name}] {facts[name]}" for name in FACT_NAMES]
+
+
+def _empty_segment_stats() -> dict:
+    """Ячейки сегмента, когда сегменты не считаются (<9 с числовой ценой)."""
+    return {
+        "count": None, "price_min": None, "price_median": None, "price_max": None,
+        "views_today_median": None, "promo_share": None,
+        "fresh": {"count": None, "views_today_median": None},
+        "stale": {"count": None, "views_today_median": None},
+    }
+
+
+def _segment_stats(items: list[dict]) -> dict:
+    item_prices = [x["price"] for x in items if x.get("price") is not None]
+    fresh = [x for x in items if x.get("freshness_class") == FRESH_LABEL]
+    stale = [x for x in items if x.get("freshness_class") == STALE_LABEL]
+
+    def views_median(group: list[dict]) -> float | None:
+        return _median([x["views_today"] for x in group if x.get("views_today") is not None])
+
+    return {
+        "count": len(items),
+        "price_min": round(min(item_prices)) if item_prices else None,
+        "price_median": round(statistics.median(item_prices)) if item_prices else None,
+        "price_max": round(max(item_prices)) if item_prices else None,
+        "views_today_median": views_median(items),
+        "promo_share": (
+            round(sum(1 for x in items if x.get("has_paid_services")) / len(items) * 100)
+            if items else None
+        ),
+        "fresh": {"count": len(fresh), "views_today_median": views_median(fresh)},
+        "stale": {"count": len(stale), "views_today_median": views_median(stale)},
+    }
+
 
 
 def build_summary(listings: list[dict]) -> dict:
@@ -327,6 +483,15 @@ def build_summary(listings: list[dict]) -> dict:
     prices = [l["price"] for l in listings if l.get("price") is not None]
     negotiable = sum(1 for l in listings if l.get("price_negotiable"))
     ranges = sum(1 for l in listings if l.get("price_range"))
+
+    segments = price_segments(listings)
+    segment_stats = {
+        label: (
+            _empty_segment_stats() if segments["границы"] is None
+            else _segment_stats(segments[label])
+        )
+        for label in SEGMENT_LABELS
+    }
 
     promo_counter = Counter(
         l["paid_services"].strip() for l in listings if l.get("paid_services")
@@ -378,6 +543,12 @@ def build_summary(listings: list[dict]) -> dict:
         "fresh_vs_stale": {label: _class_stats(items) for label, items in by_class.items()},
         "price_overall": _price_stats(prices),
         "price_by_class": price_by_class,
+        "price_segments": {
+            "границы": segments["границы"],
+            "база": len(prices),
+            "без цены": segments["без цены"],
+            "segments": segment_stats,
+        },
         "price_negotiable": negotiable,
         "price_range": ranges,
         "promo_top": promo_counter.most_common(10),

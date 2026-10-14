@@ -308,6 +308,19 @@ def validate_grounding(text: str, digest_text: str) -> list[str]:
                 violations.append(f"{label}: нет подстроки «Основание»")
             if "Проверка" not in block:
                 violations.append(f"{label}: нет подстроки «Проверка»")
+            crit_at = block.find("Критерий успеха")
+            if crit_at == -1:
+                violations.append(f"{label}: нет подстроки «Критерий успеха»")
+            else:
+                # Критерий — цель теста: обязан содержать число-порог; маркер не освобождает.
+                criterion = block[crit_at:]
+                newline = criterion.find("\n")
+                if newline != -1:
+                    criterion = criterion[:newline]
+                if not normalize_numbers(criterion):
+                    violations.append(
+                        f"{label}: в «Критерии успеха» нет числового порога"
+                    )
             if _has_marker(block):
                 continue  # маркер данных освобождает от цитаты дайджеста
             tokens = normalize_numbers(block)

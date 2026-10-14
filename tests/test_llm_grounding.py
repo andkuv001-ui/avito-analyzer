@@ -12,8 +12,10 @@ from src.llm import (
 DIGEST = "всего 12; свежее 3 / старое 8; топ-10 держат 70.0%; медиана цены 1 200"
 
 
-def _hypo(n: int, basis: str = "всего 12 объявлений", check: str = "тест") -> str:
-    return f"**Гипотеза {n}: утверждение** — Основание: {basis}; Проверка: {check}."
+def _hypo(n: int, basis: str = "всего 12 объявлений", check: str = "тест",
+          criterion: str = "≥20 просмотров/день за 14 дней") -> str:
+    return (f"**Гипотеза {n}: утверждение** — Основание: {basis}; "
+            f"Проверка: {check}; Критерий успеха: {criterion}.")
 
 
 def _verdict(text: str = "**Вердикт:** ВХОДИТЬ — всего 12 объявлений.") -> str:
@@ -92,7 +94,7 @@ def test_valid_report_passes():
 def test_marker_frees_hypothesis_from_digest_token():
     hypotheses = [
         f"**Гипотеза {i}: утверждение** — Основание: {HYPOTHESIS_MARKER}; "
-        f"Проверка: проверить тестом."
+        f"Проверка: проверить тестом; Критерий успеха: ≥20 просмотров за 14 дней."
         for i in range(1, 6)
     ]
     assert validate_grounding(_report(hypotheses), DIGEST) == []
@@ -104,7 +106,10 @@ def test_hypothesis_without_digest_token_is_violation():
 
 
 def test_hypothesis_without_any_digit_is_violation():
-    report = _report([_hypo(i, basis="нет цифр совсем") for i in range(1, 6)])
+    report = _report([
+        _hypo(i, basis="нет цифр совсем", criterion="стабильный спрос без порога")
+        for i in range(1, 6)
+    ])
     assert any("нет ни одной цифры" in v for v in validate_grounding(report, DIGEST))
 
 
@@ -115,13 +120,47 @@ def test_derived_number_alongside_real_quote_passes():
 
 def test_missing_basis_and_check_are_violations():
     hypotheses = [
-        "**Гипотеза 1: утверждение** — всего 12 объявлений; проверить.",
-        "**Гипотеза 2: утверждение 2** — Основание: всего 12.",
+        "**Гипотеза 1: утверждение** — Проверка: тест; Критерий успеха: ≥20 за 14 дней.",
+        "**Гипотеза 2: утверждение 2** — Основание: всего 12; Критерий успеха: ≥20 за 14 дней.",
         *[_hypo(i) for i in range(3, 6)],
     ]
     violations = validate_grounding(_report(hypotheses), DIGEST)
     assert any("гипотеза 1: нет подстроки «Основание»" in v for v in violations)
     assert any("гипотеза 2: нет подстроки «Проверка»" in v for v in violations)
+
+
+def test_missing_success_criterion_is_violation():
+    hypotheses = [
+        f"**Гипотеза {i}: утверждение** — Основание: всего 12; Проверка: тест."
+        for i in range(1, 6)
+    ]
+    violations = validate_grounding(_report(hypotheses), DIGEST)
+    assert sum("нет подстроки «Критерий успеха»" in v for v in violations) == 5
+
+
+def test_criterion_without_number_is_violation():
+    report = _report([
+        _hypo(i, criterion="устойчивый спрос без порога") for i in range(1, 6)
+    ])
+    violations = validate_grounding(report, DIGEST)
+    assert sum("в «Критерии успеха» нет числового порога" in v for v in violations) == 5
+
+
+def test_criterion_number_without_digest_quote_is_violation():
+    # цифра есть, но она в «Критерии», а не в «Основании» — digest-цитаты нет
+    report = _report([
+        _hypo(i, basis="цифра 987654", criterion="≥999 просмотров/день") for i in range(1, 6)
+    ])
+    violations = validate_grounding(report, DIGEST)
+    assert sum("не встречаются в дайджесте" in v for v in violations) == 5
+
+
+def test_marker_in_criterion_is_violation():
+    report = _report([
+        _hypo(i, criterion=HYPOTHESIS_MARKER) for i in range(1, 6)
+    ])
+    violations = validate_grounding(report, DIGEST)
+    assert sum("в «Критерии успеха»" in v for v in violations) == 5
 
 
 def test_hypothesis_bad_formatting_is_violation():

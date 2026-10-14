@@ -7,11 +7,14 @@ from src.dates import NO_FRESHNESS
 from src.metrics import (
     FACT_NAMES,
     FRESH_LABEL,
+    SEGMENT_LABELS,
     STALE_LABEL,
     build_fact_pack,
     build_summary,
     classify_freshness,
+    cluster_price_stats,
     compute_listing_metrics,
+    price_segments,
 )
 from src.parse_excel import parse_price, parse_workbook
 
@@ -274,9 +277,13 @@ def test_fact_pack_top10_concentration():
 def test_fact_pack_promo_effect():
     facts = _facts(_fact_listings(), _fact_classifications())
     promo = _fact(facts, "promo-эффект")
-    assert "с платными услугами — 0 (1 шт.)" in promo
+    assert "по всей выдаче: медиана «Просмотров сегодня» с платными услугами — 0 (1 шт.)" in promo
     assert "без — 7.5 (3 шт.)" in promo
     assert "отношение ×0.0" in promo
+    # база <9 с ценой → сегменты не считаются
+    assert "внутри сегментов: дешёвые — [НЕТ ДАННЫХ]" in promo
+    assert "средние — [НЕТ ДАННЫХ]" in promo
+    assert "дорогие — [НЕТ ДАННЫХ]" in promo
 
 
 def test_fact_pack_fresh_vs_stale():
@@ -285,16 +292,17 @@ def test_fact_pack_fresh_vs_stale():
     assert "свежее — 10 (1 шт.)" in fvs
     assert "старое — 2.5 (2 шт.)" in fvs
     assert "отношение ×4.0" in fvs
+    assert "внутри ценовых сегментов: дешёвые — [НЕТ ДАННЫХ]" in fvs
 
 
 def test_fact_pack_price_vs_demand():
     facts = _facts(_fact_listings(), _fact_classifications())
     price = _fact(facts, "цена vs спрос")
     assert "медиана цены 200, коридор 100–300" in price
+    assert "сегменты не считаются — с числовой ценой 3 (<9)" in price
+    assert "дешёвые — [НЕТ ДАННЫХ], средние — [НЕТ ДАННЫХ], дорогие — [НЕТ ДАННЫХ]" in price
     assert "«договорная» — 0" in price
-    assert "дешёвой половины — 5" in price
-    assert "дорогой — 5" in price
-    assert "отношение ×1.0" in price
+    assert "без числовой цены — 1" in price
 
 
 def test_fact_pack_top3_sellers():
@@ -320,7 +328,7 @@ def test_fact_pack_b2b_and_top_queries():
 
 def test_fact_pack_without_classifications():
     facts = _facts(_fact_listings(), None)
-    for name in ("кластеры без свежих", "B2B-доля", "топ-5 запросов"):
+    for name in ("кластеры без свежих", "B2B-доля", "топ-5 запросов", "цены по кластерам"):
         assert _fact(facts, name) == NO_DATA
     assert _fact(facts, "объём") == "всего 4; с датой публикации 3; без даты 1"
 
@@ -337,6 +345,125 @@ def test_fact_pack_empty_bases():
     assert NO_DATA in _fact(facts, "свежие vs старые")
     assert NO_DATA in _fact(facts, "цена vs спрос")
     assert "«договорная» — 0" in _fact(facts, "цена vs спрос")
+    assert "без числовой цены — 2" in _fact(facts, "цена vs спрос")
     assert _fact(facts, "кластеры без свежих") == NO_DATA
     assert _fact(facts, "топ-5 запросов") == NO_DATA
+    assert _fact(facts, "цены по кластерам") == NO_DATA
     assert _fact(facts, "B2B-доля") == "объявлений с B2B 0 (0.0%)"
+
+
+# --- ценовые сегменты ------------------------------------------------------
+
+def _segment_listings(count: int = 9):
+    out = []
+    for i in range(count):
+        views = (i + 1) * 10
+        fresh = i % 2 == 0
+        out.append(compute_listing_metrics(_listing(
+            n=i + 1, price=float((i + 1) * 100), views_today=views,
+            published_at=datetime(2026, 10, 1) if fresh else datetime(2026, 8, 1),
+            views_total=views * 2 if fresh else 5000), REF))
+    return out
+
+
+def test_price_segments_terciles():
+    segs = price_segments(_segment_listings())
+    assert segs["границы"] == (400.0, 700.0)
+    assert [l["n"] for l in segs["дешёвые"]] == [1, 2, 3, 4]
+    assert [l["n"] for l in segs["средние"]] == [5, 6, 7]
+    assert [l["n"] for l in segs["дорогие"]] == [8, 9]
+    assert segs["без цены"] == 0
+    p33, p66 = segs["границы"]
+    assert all(l["price"] <= p33 for l in segs["дешёвые"])
+    assert all(p33 < l["price"] <= p66 for l in segs["средние"])
+    assert all(l["price"] > p66 for l in segs["дорогие"])
+
+
+def test_price_segments_small_base_no_segments():
+    segs = price_segments(_segment_listings()[:8])
+    assert segs["границы"] is None
+    for label in SEGMENT_LABELS:
+        assert segs[label] == []
+    assert segs["без цены"] == 0
+
+
+def test_price_segments_negotiable_and_missing_price_outside():
+    listings = _segment_listings() + [
+        compute_listing_metrics(_listing(n=10, price=None, price_negotiable=True), REF),
+        compute_listing_metrics(_listing(n=11, price=None, price_raw="Договорная"), REF),
+    ]
+    segs = price_segments(listings)
+    assert segs["без цены"] == 2
+    inside = [l["n"] for label in SEGMENT_LABELS for l in segs[label]]
+    assert len(inside) == 9
+    assert 10 not in inside and 11 not in inside
+
+
+def test_summary_price_segments_stats():
+    ps = build_summary(_segment_listings())["price_segments"]
+    assert ps["границы"] == (400.0, 700.0)
+    assert ps["база"] == 9
+    assert ps["без цены"] == 0
+    cheap = ps["segments"]["дешёвые"]
+    assert cheap["count"] == 4
+    assert (cheap["price_min"], cheap["price_median"], cheap["price_max"]) == (100, 250, 400)
+    assert cheap["views_today_median"] == 25
+    assert cheap["promo_share"] == 0
+    assert cheap["fresh"]["count"] == 2 and cheap["stale"]["count"] == 2
+    assert ps["segments"]["средние"]["count"] == 3
+    assert ps["segments"]["дорогие"]["count"] == 2
+
+
+def test_summary_price_segments_small_base_no_data():
+    ps = build_summary(_segment_listings()[:8])["price_segments"]
+    assert ps["границы"] is None
+    assert ps["база"] == 8
+    for label in SEGMENT_LABELS:
+        seg = ps["segments"][label]
+        assert seg["count"] is None
+        assert seg["price_min"] is None and seg["views_today_median"] is None
+        assert seg["fresh"]["count"] is None and seg["stale"]["count"] is None
+
+
+def test_fact_pack_price_vs_demand_with_segments():
+    price = _fact(_facts(_segment_listings()), "цена vs спрос")
+    assert "границы тертилей 400 / 700" in price
+    assert "дешёвые — 4 шт., медиана «Просмотров сегодня» 25.0" in price
+    assert "средние — 3 шт., медиана «Просмотров сегодня» 60" in price
+    assert "дорогие — 2 шт., медиана «Просмотров сегодня» 85.0" in price
+    assert "«договорная» — 0" in price
+    assert "без числовой цены — 0" in price
+
+
+def test_fact_pack_fresh_vs_stale_within_segments():
+    fvs = _fact(_facts(_segment_listings()), "свежие vs старые")
+    assert "дешёвые — свежее 20.0 (2 шт.), старое 30.0 (2 шт.), отношение ×0.7" in fvs
+    assert "средние — свежее 60.0 (2 шт.), старое 60 (1 шт.), отношение ×1.0" in fvs
+    assert "дорогие — свежее 90 (1 шт.), старое 80 (1 шт.), отношение ×1.1" in fvs
+
+
+def test_fact_pack_promo_within_segments():
+    listings = _segment_listings()
+    listings[0]["paid_services"] = "Витрина"
+    listings[0] = compute_listing_metrics(listings[0], REF)
+    promo = _fact(_facts(listings), "promo-эффект")
+    assert "дешёвые — с 10 (1 шт.) / без 30 (3 шт.), отношение ×0.3" in promo
+    assert "средние — с [НЕТ ДАННЫХ] (0 шт.)" in promo
+
+
+def test_fact_pack_cluster_prices():
+    listings = _segment_listings()
+    classifications = {
+        i + 1: {
+            "b2b": "B2C",
+            "clusters": [{"kind": "товарный", "tag": "мох" if i < 6 else "кактус"}],
+            "queries": [], "usp": None, "scenario": None,
+        }
+        for i in range(9)
+    }
+    assert _fact(_facts(listings, classifications), "цены по кластерам") == \
+        "мох (6): 350, кактус (3): 800"
+
+
+def test_cluster_price_stats_without_classifications():
+    assert cluster_price_stats(_segment_listings(), None) == []
