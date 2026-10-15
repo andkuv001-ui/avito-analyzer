@@ -234,6 +234,9 @@ _RE_SECTION_9 = re.compile(r"^##\s*9[.:]", flags=re.MULTILINE)
 _RE_HYP_HEADER = re.compile(r"^\*\*Гипотеза\s+(\d+):", flags=re.MULTILINE)
 _RE_HYP_ANY = re.compile(r"Гипотеза\s*\d+")
 _RE_HYP_LINE = re.compile(r"^\*\*Гипотеза\s+\d+:")
+_RE_SINGLETON_BASIS = re.compile(
+    r"(?<![\d.,])1\s+(?:[^\s;.,]+\s+){0,3}объявлени", flags=re.IGNORECASE
+)
 _RE_POINT = re.compile(r"^\s*(\d+)\)", flags=re.MULTILINE)
 _RE_POINT_BAD = re.compile(r"^\s*(\d+)\.", flags=re.MULTILINE)
 
@@ -320,6 +323,17 @@ def validate_grounding(text: str, digest_text: str) -> list[str]:
                 if not normalize_numbers(criterion):
                     violations.append(
                         f"{label}: в «Критерии успеха» нет числового порога"
+                    )
+            basis_at = block.find("Основание")
+            if basis_at != -1:
+                check_at = block.find("Проверка", basis_at)
+                basis = block[basis_at:check_at] if check_at != -1 else block[basis_at:]
+                # Основание из единичного объявления («1 старое объявление…») —
+                # признак надуманной гипотезы: нужен агрегат или маркер.
+                if _RE_SINGLETON_BASIS.search(basis) and normalize_numbers(basis) <= {1.0}:
+                    violations.append(
+                        f"{label}: «Основание» опирается на единичное объявление — "
+                        f"нужен агрегат из дайджеста или маркер {HYPOTHESIS_MARKER}"
                     )
             if _has_marker(block):
                 continue  # маркер данных освобождает от цитаты дайджеста

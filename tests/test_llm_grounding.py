@@ -291,3 +291,31 @@ def test_generate_report_broken_retry_keeps_first_text(monkeypatch):
     text, warning = llm.generate_report("sys", DIGEST)
     assert text == _invalid_text()
     assert warning and warning.startswith(GROUNDING_WARNING_PREFIX)
+
+
+# --- запрет надуманных гипотез (основание из единичного объявления) --------
+
+
+def test_singleton_basis_is_violation():
+    report = _report([
+        _hypo(i, basis="1 старое объявление с упоминанием дефектов")
+        for i in range(1, 6)
+    ])
+    violations = validate_grounding(report, DIGEST)
+    assert sum("единичное объявление" in v for v in violations) == 5
+
+
+def test_singleton_as_part_of_aggregate_basis_passes():
+    report = _report([
+        _hypo(i, basis="12 объявлений, из них 1 объявление свежее")
+        for i in range(1, 6)
+    ])
+    assert validate_grounding(report, DIGEST) == []
+
+
+def test_singleton_pattern_not_triggered_by_double_digits():
+    report = _report([
+        _hypo(i, basis="21 объявление держит 12 продавцов")
+        for i in range(1, 6)
+    ])
+    assert validate_grounding(report, DIGEST) == []
