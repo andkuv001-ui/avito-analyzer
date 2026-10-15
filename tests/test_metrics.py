@@ -467,3 +467,79 @@ def test_fact_pack_cluster_prices():
 
 def test_cluster_price_stats_without_classifications():
     assert cluster_price_stats(_segment_listings(), None) == []
+
+
+# --- очистка тегов карты спроса ---------------------------------------------
+
+def test_normalize_cluster_tag_junk_query_dropped():
+    from src.metrics import normalize_cluster_tag
+    assert normalize_cluster_tag("бесплатно, после стирки") is None
+    assert normalize_cluster_tag("дефекты рюкзака") is None
+    assert normalize_cluster_tag("следы эксплуатации") is None
+    assert normalize_cluster_tag("уценка") is None
+    assert normalize_cluster_tag("") is None
+
+
+def test_normalize_cluster_tag_sizes_merged():
+    from src.metrics import normalize_cluster_tag
+    assert normalize_cluster_tag("размер 40x30x14") == "размеры"
+    assert normalize_cluster_tag("размеры 43x28x15") == "размеры"
+
+
+def test_normalize_cluster_tag_normal_passes():
+    from src.metrics import normalize_cluster_tag
+    assert normalize_cluster_tag("  рюкзак городской ") == "рюкзак городской"
+
+
+def test_cluster_price_stats_merges_case_duplicates_and_junk():
+    classifications = {
+        1: {"b2b": "B2C",
+            "clusters": [{"kind": "товарный", "tag": "Рюкзак Urban"},
+                         {"kind": "товарный", "tag": "рюкзак urban"}],
+            "queries": [], "usp": None, "scenario": None},
+        2: {"b2b": "B2C",
+            "clusters": [{"kind": "товарный", "tag": "дефекты рюкзака"}],
+            "queries": [], "usp": None, "scenario": None},
+    }
+    listings = [
+        compute_listing_metrics(_listing(n=1, price=1000.0), REF),
+        compute_listing_metrics(_listing(n=2, price=500.0), REF),
+    ]
+    rows = cluster_price_stats(listings, classifications)
+    assert len(rows) == 1
+    assert rows[0]["tag"] == "Рюкзак Urban"
+    assert rows[0]["count"] == 2
+
+
+def test_fact_pack_realistic_thresholds_with_segments():
+    listings = _segment_listings()
+    classifications = {
+        i + 1: {"b2b": "B2C",
+                "clusters": [{"kind": "товарный", "tag": "мох"}],
+                "queries": [], "usp": None, "scenario": None}
+        for i in range(9)
+    }
+    facts = _facts(listings, classifications)
+    kpi = _fact(facts, "реалистичные пороги")
+    # сегменты: дешёвые (10,20,30,40) med 25 → ×2 = 50; средние (50,60,70) med 60 → 120;
+    # дорогие (80,90) med 85 → 170
+    assert "дешёвые — 50 (медиана ×2)" in kpi
+    assert "средние — 120 (медиана ×2)" in kpi
+    assert "дорогие — 170 (медиана ×2)" in kpi
+
+
+def test_fact_pack_realistic_thresholds_small_base():
+    facts = _facts(_fact_listings(), _fact_classifications())
+    kpi = _fact(facts, "реалистичные пороги")
+    # сегменты не считаются (<9 с ценой): медиана «Просмотров сегодня» 5 → 10
+    assert "по всей выборке — 10" in kpi
+    assert "сегменты не считаются" in kpi
+
+
+def test_fact_pack_realistic_thresholds_no_views_is_no_data():
+    listings = [
+        compute_listing_metrics(_listing(n=i, price=float(i * 100)), REF)
+        for i in range(1, 10)
+    ]
+    facts = _facts(listings)
+    assert _fact(facts, "реалистичные пороги") == NO_DATA

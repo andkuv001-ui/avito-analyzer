@@ -8,7 +8,13 @@ from collections import Counter
 from datetime import datetime
 
 from .dates import NO_FRESHNESS
-from .metrics import FRESHNESS_CLASSES, SEGMENT_LABELS, _fmt_int, price_segments
+from .metrics import (
+    FRESHNESS_CLASSES,
+    SEGMENT_LABELS,
+    _fmt_int,
+    normalize_cluster_tag,
+    price_segments,
+)
 
 DEMAND_MAP_PLACEHOLDER = "[ТАБЛИЦА КАРТЫ СПРОСА]"
 NO_DATA_LABEL = "[НЕТ ДАННЫХ]"
@@ -22,6 +28,7 @@ def build_demand_map_table(classifications: dict[int, dict] | None, listings: li
     row_totals: dict[tuple[str, str], int] = {}
     row_prices: dict[tuple[str, str], list[float]] = {}
     row_segments: dict[tuple[str, str], Counter] = {}
+    row_labels: dict[tuple[str, str], str] = {}  # ключ → отображаемый тег
 
     segments = price_segments(listings)
     segments_on = segments["границы"] is not None
@@ -32,9 +39,12 @@ def build_demand_map_table(classifications: dict[int, dict] | None, listings: li
                 segment_of[record["n"]] = label
 
     def bump(row_key: tuple[str, str], klass: str,
-             price: float | None = None, segment: str | None = None):
+             price: float | None = None, segment: str | None = None,
+             label: str | None = None):
         counts[(row_key, klass)] = counts.get((row_key, klass), 0) + 1
         row_totals[row_key] = row_totals.get(row_key, 0) + 1
+        if label is not None:
+            row_labels.setdefault(row_key, label)
         if price is not None:
             row_prices.setdefault(row_key, []).append(price)
         if segment is not None:
@@ -51,10 +61,20 @@ def build_demand_map_table(classifications: dict[int, dict] | None, listings: li
             segment = segment_of.get(record["n"])
             clusters = (classifications.get(record["n"]) or {}).get("clusters") or []
             if not clusters:
-                bump(("(без тегов)", ""), klass, price, segment)
+                bump(("(без тегов)", ""), klass, price, segment,
+                     label="(без тегов)")
                 continue
             for cluster in clusters:
-                bump((cluster["tag"].strip(), cluster["kind"]), klass, price, segment)
+                tag = normalize_cluster_tag(cluster.get("tag"))
+                if not tag:
+                    continue  # мусорный запрос — строка карты исключается
+                kind = str(cluster.get("kind") or "").strip()
+                key = (tag.casefold(), kind)
+                bump(key, klass, price, segment, label=tag)
+            if not any(normalize_cluster_tag(c.get("tag")) for c in clusters):
+                # все теги объявления мусорные — строка «без тегов»
+                bump(("(без тегов)", ""), klass, price, segment,
+                     label="(без тегов)")
 
     if not counts:
         return f"*{NO_DATA_LABEL}*"
@@ -76,9 +96,10 @@ def build_demand_map_table(classifications: dict[int, dict] | None, listings: li
     sep = "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"
     rows = [header, sep]
 
-    order = sorted(row_totals, key=lambda k: (-row_totals[k], k[0]))
+    order = sorted(row_totals, key=lambda k: (-row_totals[k], row_labels.get(k, k[0])))
     for key in order:
-        tag, kind = key
+        _tag_key, kind = key
+        tag = row_labels.get(key, _tag_key)
         cells = [str(counts.get((key, col), 0)) for col in columns]
         rows.append(
             f"| {tag} | {kind or '—'} | " + " | ".join(cells) +

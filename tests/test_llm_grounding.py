@@ -18,8 +18,13 @@ def _hypo(n: int, basis: str = "всего 12 объявлений", check: str 
             f"Проверка: {check}; Критерий успеха: {criterion}.")
 
 
-def _verdict(text: str = "**Вердикт:** ВХОДИТЬ — всего 12 объявлений.") -> str:
+def _verdict(text: str = "**Вердикт:** ВХОДИТЬ ПРИ УСЛОВИИ — сегмент: дешёвые, "
+                         "медиана 12, всего 12 объявлений.") -> str:
     return text
+
+
+_ECON_CAVEAT = ("Юнит-экономика (себестоимость, маржа, CAC) нашими данными не "
+                "измеряется — нет данных; вердикт — о трафике, а не о прибыли.")
 
 
 def _conclusion(point7: str = "сделать X, основание 12, эффект 70.0%",
@@ -32,14 +37,15 @@ def _conclusion(point7: str = "сделать X, основание 12, эффе
 
 def _report(hypotheses: list[str] | None = None, verdict: str | None = None,
             conclusion: str | None = None, section_8: bool = True,
-            section_9: bool = True) -> str:
+            section_9: bool = True, econ_caveat: bool = True) -> str:
     hypotheses = hypotheses if hypotheses is not None else [_hypo(i) for i in range(1, 6)]
     parts = ["# Аналитический отчёт по выдаче Avito", "", "## 1. Обзор выдачи", "", "текст."]
     if section_8:
         parts += ["", "## 8. Гипотезы", "", "\n".join(hypotheses)]
     if section_9:
+        caveat = f"\n\n{_ECON_CAVEAT}" if econ_caveat else ""
         parts += ["", "## 9. Решение о входе", "",
-                  verdict if verdict is not None else _verdict(), "",
+                  (verdict if verdict is not None else _verdict()) + caveat, "",
                   conclusion if conclusion is not None else _conclusion()]
     return "\n".join(parts)
 
@@ -303,7 +309,16 @@ def test_singleton_basis_is_violation():
         for i in range(1, 6)
     ])
     violations = validate_grounding(report, DIGEST)
-    assert sum("единичное объявление" in v for v in violations) == 5
+    assert sum("1–2 объявления" in v for v in violations) == 5
+
+
+def test_two_listing_basis_is_violation():
+    report = _report([
+        _hypo(i, basis="2 объявления кластера")
+        for i in range(1, 6)
+    ])
+    violations = validate_grounding(report, DIGEST)
+    assert sum("1–2 объявления" in v for v in violations) == 5
 
 
 def test_singleton_as_part_of_aggregate_basis_passes():
@@ -378,9 +393,117 @@ def test_funnel_caveat_in_verdict_block_passes():
     # оговорка стоит сразу после вердикта, до пунктов — это норма
     conclusion = "\n".join(f"{i}) пункт с цифрой 12." for i in range(1, 8))
     report = _report(
-        verdict="**Вердикт:** ВХОДИТЬ — медиана 12 просмотров/день.\n\n"
+        verdict="**Вердикт:** ВХОДИТЬ ПРИ УСЛОВИИ — сегмент: дешёвые, "
+                "медиана 12 просмотров/день.\n\n"
                 "Просмотры — второй этап воронки: конверсию в контакты "
                 "предполагаем только гипотетически.",
         conclusion=conclusion,
     )
     assert validate_grounding(report, DIGEST) == []
+
+
+# --- сезонность: «0 свежих» без проверки сезона -------------------------------
+
+def test_no_fresh_basis_without_season_is_violation():
+    report = _report([
+        _hypo(i, basis="0 свежих объявлений в кластере, всего 12")
+        for i in range(1, 6)
+    ])
+    violations = validate_grounding(report, DIGEST)
+    assert sum("сезонност" in v for v in violations) == 5
+
+
+def test_no_fresh_basis_with_season_passes():
+    report = _report([
+        _hypo(i, basis="0 свежих объявлений, сезон: октябрь — межсезонье, всего 12")
+        for i in range(1, 6)
+    ])
+    assert validate_grounding(report, DIGEST) == []
+
+
+# --- сервис (доставка/оплата) не может быть гипотезой входа ------------------
+
+def test_delivery_hypothesis_title_is_violation():
+    report = _report([
+        _hypo(i).replace("утверждение", f"предложение рюкзаков с доставкой {i}")
+        for i in range(1, 6)
+    ])
+    violations = validate_grounding(report, DIGEST)
+    assert sum("сервис (доставка/оплата)" in v for v in violations) == 5
+
+
+def test_delivery_niche_exempts_service_ban():
+    digest = "Ниша/товар: доставка грузов\n" + DIGEST
+    report = _report([
+        _hypo(i).replace("утверждение", f"спрос на доставку по городу {i}")
+        for i in range(1, 6)
+    ])
+    assert validate_grounding(report, digest) == []
+
+
+# --- KPI-реализм: порог просмотров/день ≤ потолка из дайджеста ---------------
+
+KPI_DIGEST = (
+    DIGEST + "\n[реалистичные пороги] по сегментам: дешёвые — 7 (медиана ×2), "
+    "средние — 4 (медиана ×2); порог успеха выше потолка"
+)
+
+
+def test_views_per_day_above_cap_is_violation():
+    report = _report([
+        _hypo(i, criterion="≥10 просмотров/день за 14 дней")
+        for i in range(1, 6)
+    ])
+    violations = validate_grounding(report, KPI_DIGEST)
+    assert sum("превышает реалистичный потолок" in v for v in violations) == 5
+
+
+def test_views_per_day_at_cap_passes():
+    report = _report([
+        _hypo(i, criterion="≥7 просмотров/день за 14 дней")
+        for i in range(1, 6)
+    ])
+    assert validate_grounding(report, KPI_DIGEST) == []
+
+
+def test_views_per_day_above_cap_with_paid_budget_passes():
+    report = _report([
+        _hypo(i, check="тест с бюджетом на платные услуги XL",
+              criterion="≥10 просмотров/день за 14 дней")
+        for i in range(1, 6)
+    ])
+    assert validate_grounding(report, KPI_DIGEST) == []
+
+
+def test_no_kpi_fact_in_digest_skips_cap_check():
+    report = _report([
+        _hypo(i, criterion="≥10 просмотров/день за 14 дней")
+        for i in range(1, 6)
+    ])
+    assert validate_grounding(report, DIGEST) == []
+
+
+# --- юнит-экономика: обязательная оговорка в §9 ------------------------------
+
+def test_missing_unit_economics_caveat_is_violation():
+    report = _report(econ_caveat=False)
+    violations = validate_grounding(report, DIGEST)
+    assert any("юнит-экономику" in v for v in violations)
+
+
+# --- вердикт: сегмент обязателен, безусловный «ВХОДИТЬ» запрещён -------------
+
+def test_verdict_without_segment_is_violation():
+    verdict = "**Вердикт:** ВХОДИТЬ ПРИ УСЛОВИИ — всего 12 объявлений."
+    violations = validate_grounding(_report(verdict=verdict), DIGEST)
+    assert any("не назван целевой ценовой сегмент" in v for v in violations)
+
+
+def test_unconditional_enter_verdict_is_violation():
+    verdict = "**Вердикт:** ВХОДИТЬ — сегмент: дешёвые, всего 12 объявлений."
+    violations = validate_grounding(_report(verdict=verdict), DIGEST)
+    assert any("безусловный «ВХОДИТЬ»" in v for v in violations)
+
+
+def test_conditional_verdict_with_segment_passes():
+    assert validate_grounding(_report(), DIGEST) == []

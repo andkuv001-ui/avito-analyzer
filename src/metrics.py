@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 import statistics
 from collections import Counter
 from datetime import datetime
@@ -133,7 +135,47 @@ FACT_NAMES = (
     "объём", "классы", "нулевые просмотры", "концентрация топ-10",
     "promo-эффект", "свежие vs старые", "цена vs спрос", "продавцы",
     "кластеры без свежих", "B2B-доля", "топ-5 запросов", "цены по кластерам",
+    "реалистичные пороги",
 )
+
+# Порог «Критерия успеха» по просмотрам: 2× медианы «Просмотров сегодня».
+# Порог в 5–10× медианы (без бюджета на платные услуги) нереалистичен.
+KPI_CAP_FACTOR = 2
+
+# Очистка тегов карты спроса: мусорные запросы (пометки состояния/подачи)
+# не являются товарным спросом — строка в карту не попадает.
+_JUNK_TAG_RE = re.compile(
+    r"(?:^|[\s,])(?:"
+    r"бесплатно|бесплатный|дефект\w*|следы\s+эксплуатации|после\s+стирки|"
+    r"б/у|бывш\w*\s+в\s+употреблении|уцен\w*"
+    r")(?:$|[\s,.])",
+    re.IGNORECASE,
+)
+# Размеры: «размер 40x30x14», «размеры 43x28x15» → один кластер «размеры».
+_SIZE_TAG_RE = re.compile(r"^размеры?\b", re.IGNORECASE)
+
+
+def normalize_cluster_tag(tag) -> str | None:
+    """Канонический вид тега карты спроса.
+
+    - мусорный запрос (пометка состояния/подачи) → None — строка исключается;
+    - варианты размеров → один тег «размеры»;
+    - регистр сохраняется (склейка дублей регистра — на уровне ключа группировки).
+    """
+    text = " ".join(str(tag or "").split())
+    if not text:
+        return None
+    if _JUNK_TAG_RE.search(text):
+        return None
+    if _SIZE_TAG_RE.match(text):
+        return "размеры"
+    return text
+
+
+def tag_key(tag) -> str:
+    """Ключ группировки: склейка дублей, отличающихся только регистром/пробелами."""
+    normalized = normalize_cluster_tag(tag)
+    return normalized.casefold() if normalized else ""
 
 
 def _fmt_int(value: int) -> str:
@@ -188,6 +230,27 @@ def price_segments(listings: list[dict]) -> dict:
     return result
 
 
+def kpi_caps(listings: list[dict]) -> dict:
+    """Реалистичный потолок «Критерия успеха» по просмотрам: 2× медианы сегмента.
+
+    Считается по каждому ценовому сегменту (тертили); при малой базе сегментов —
+    по всей выборке. `{"по сегментам": bool, "caps": {сегмент: int|None}, ...}`.
+    """
+    segments = price_segments(listings)
+    caps: dict[str, int | None] = {}
+    if segments["границы"] is not None:
+        for label in SEGMENT_LABELS:
+            med = _median([l["views_today"] for l in segments[label]
+                           if l.get("views_today") is not None])
+            caps[label] = int(med * KPI_CAP_FACTOR) if med is not None else None
+        return {"по сегментам": True, "caps": caps,
+                "границы": segments["границы"]}
+    med = _median([l["views_today"] for l in listings if l.get("views_today") is not None])
+    return {"по сегментам": False,
+            "caps": {NO_DATA: int(med * KPI_CAP_FACTOR) if med is not None else None},
+            "границы": None}
+
+
 def cluster_price_stats(listings: list[dict],
                         classifications: dict[int, dict] | None) -> list[dict]:
     """Строки «цен по кластерам»: top-10 тегов стадии A по N, медиана цены и просмотров."""
@@ -196,12 +259,14 @@ def cluster_price_stats(listings: list[dict],
     per_tag: dict[str, dict] = {}
     for l in listings:
         for cluster in (classifications.get(l["n"]) or {}).get("clusters") or []:
-            tag = str(cluster.get("tag") or "").strip()
+            tag = normalize_cluster_tag(cluster.get("tag"))
             if not tag:
                 continue
-            entry = per_tag.setdefault(tag, {
+            key = tag.casefold()
+            kind = str(cluster.get("kind") or "").strip()
+            entry = per_tag.setdefault(key, {
                 "tag": tag,
-                "kind": str(cluster.get("kind") or "").strip(),
+                "kind": kind,
                 "count": 0,
                 "prices": [],
                 "views": [],
@@ -368,6 +433,27 @@ def build_fact_pack(listings: list[dict], summary: dict,
         f"без числовой цены — {segments['без цены']}"
     )
 
+    kpi = kpi_caps(listings)
+    if kpi["по сегментам"]:
+        parts = []
+        for label in SEGMENT_LABELS:
+            cap = kpi["caps"][label]
+            parts.append(f"{label} — {cap if cap is not None else NO_DATA} "
+                         f"(медиана ×{KPI_CAP_FACTOR})")
+        facts["реалистичные пороги"] = (
+            ("по сегментам: " + ", ".join(parts) +
+             "; порог успеха выше потолка сегмента нереалистичен без платного продвижения")
+            if any(cap is not None for cap in kpi["caps"].values()) else NO_DATA
+        )
+    else:
+        cap = next(iter(kpi["caps"].values()), None)
+        facts["реалистичные пороги"] = (
+            f"по всей выборке — {cap if cap is not None else NO_DATA} "
+            f"(медиана «Просмотров сегодня» ×{KPI_CAP_FACTOR}); "
+            "сегменты не считаются"
+            if cap is not None else NO_DATA
+        )
+
     sellers = summary["sellers"]
     if not sellers:
         facts["продавцы"] = NO_DATA
@@ -386,21 +472,23 @@ def build_fact_pack(listings: list[dict], summary: dict,
         facts["топ-5 запросов"] = NO_DATA
         facts["цены по кластерам"] = NO_DATA
     else:
-        per_tag: dict[str, list[int]] = {}
+        per_tag: dict[str, list] = {}
         for l in listings:
             for cluster in (classifications.get(l["n"]) or {}).get("clusters") or []:
-                tag = str(cluster.get("tag") or "").strip()
+                tag = normalize_cluster_tag(cluster.get("tag"))
                 if not tag:
                     continue
-                slot = per_tag.setdefault(tag, [0, 0])
-                slot[0] += 1
+                key = tag.casefold()
+                slot = per_tag.setdefault(key, [tag, 0, 0])
+                slot[1] += 1
                 if l.get("freshness_class") == FRESH_LABEL:
-                    slot[1] += 1
+                    slot[2] += 1
         if not per_tag:
             facts["кластеры без свежих"] = NO_DATA
         else:
-            without_fresh = [f"{tag} ({slot[0]})"
-                             for tag, slot in sorted(per_tag.items()) if slot[1] == 0]
+            without_fresh = [f"{slot[0]} ({slot[1]})"
+                             for slot in sorted(per_tag.values(),
+                                                key=lambda s: s[0]) if slot[2] == 0]
             facts["кластеры без свежих"] = (
                 "теги без свежих объявлений: " + (", ".join(without_fresh) if without_fresh else "нет")
             )

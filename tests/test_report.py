@@ -175,3 +175,54 @@ def test_demand_map_fallback_with_prices_has_segment_counters():
     cells = [c.strip() for c in row.split("|")]
     assert cells[6] == "500"
     assert cells[7:10] == ["4", "3", "2"]
+
+
+# --- очистка карты спроса: мусор, дубли регистра, размеры --------------------
+
+def test_demand_map_drops_junk_rows():
+    classifications = {
+        1: {"clusters": [{"kind": "товарный", "tag": "кактусы"}],
+            "b2b": "B2C", "queries": [], "usp": None, "scenario": None},
+        2: {"clusters": [{"kind": "проблемный", "tag": "бесплатно, после стирки"}],
+            "b2b": "B2C", "queries": [], "usp": None, "scenario": None},
+        3: {"clusters": [{"kind": "товарный", "tag": "дефекты рюкзака"}],
+            "b2b": "B2C", "queries": [], "usp": None, "scenario": None},
+    }
+    listings = [_listing(1, FRESH), _listing(2, STALE), _listing(3, STALE)]
+    table = build_demand_map_table(classifications, listings)
+    assert "бесплатно" not in table
+    assert "дефекты" not in table
+    assert "кактусы" in table
+    # мусорное объявление попадает в «(без тегов)», ИТОГО по строкам — 2 тега + 2 без тегов
+    assert "(без тегов)" in table
+
+
+def test_demand_map_merges_case_duplicates():
+    classifications = {
+        1: {"clusters": [{"kind": "сценарный", "tag": "Urban Life Style"},
+                         {"kind": "сценарный", "tag": "urban life style"}],
+            "b2b": "B2C", "queries": [], "usp": None, "scenario": None},
+        2: {"clusters": [{"kind": "сценарный", "tag": "URBAN LIFE STYLE"}],
+            "b2b": "B2C", "queries": [], "usp": None, "scenario": None},
+    }
+    listings = [_listing(1, FRESH), _listing(2, STALE)]
+    table = build_demand_map_table(classifications, listings)
+    rows = [l for l in table.splitlines() if l.startswith("| ") and "Urban Life Style" in l]
+    assert len(rows) == 1
+    cells = [c.strip() for c in rows[0].split("|")]
+    assert cells[10] == "3"  # ИТОГО — все 3 вхождения склеены в одну строку
+
+
+def test_demand_map_merges_size_variants():
+    classifications = {
+        i: {"clusters": [{"kind": "характеристический", "tag": f"размер 40x30x{i}"}],
+            "b2b": "B2C", "queries": [], "usp": None, "scenario": None}
+        for i in range(1, 4)
+    }
+    listings = [_listing(i, FRESH) for i in range(1, 4)]
+    table = build_demand_map_table(classifications, listings)
+    size_rows = [l for l in table.splitlines() if "размер" in l]
+    assert len(size_rows) == 1
+    cells = [c.strip() for c in size_rows[0].split("|")]
+    assert cells[1] == "размеры"
+    assert cells[10] == "3"

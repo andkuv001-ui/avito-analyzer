@@ -8,6 +8,7 @@ from typing import Callable
 
 from . import config
 from .dates import NO_FRESHNESS
+from .metrics import normalize_cluster_tag
 
 ALLOWED_KINDS = {"товарный", "характеристический", "сценарный", "проблемный", "коммерческий"}
 CHUNK_SIZE = 8
@@ -35,6 +36,16 @@ STAGE_A_SYSTEM = """Ты — аналитик поисковой выдачи Av
 - "queries": список 1–5 поисковых запросов покупателя, которые можно извлечь из текста;
 - "usp": главное УТП объявления (строка или null);
 - "scenario": сценарий покупки в 1 предложение (строка или null).
+
+Правила тегов (карта спроса должна быть чистой):
+- тег — это запрос ПОКУПАТЕЛЯ, а не пометка продавца. Пометки состояния и подачи
+  («дефекты», «следы эксплуатации», «бесплатно после стирки», «уценка», «б/у») — НЕ теги;
+- не создавай теги-дубли, отличающиеся только регистром или пробелами: «Urban Life Style»
+  и «urban life style» — это ОДИН тег, выбери один вариант написания;
+- варианты размеров/габаритов («размер 40x30x14», «размеры 43x28x15») — один тег «размеры»
+  (kind «характеристический»), не плоди строку на каждое значение;
+- не выделяй отдельный тег под каждую мелочь из описания (замок, молния, карман) — если это
+  не самостоятельный товарный запрос, не тегируй.
 
 Ответ — только валидный JSON-массив объектов для ВСЕХ переданных объявлений, без markdown и пояснений."""
 
@@ -132,13 +143,22 @@ def validate_stage_a(parsed, expected_ns: set[int]) -> dict[int, dict]:
         if not isinstance(clusters, list):
             raise LLMError("Стадия A: нет clusters.")
         normalized = []
+        seen: set[str] = set()
         for cluster in clusters:
             if not isinstance(cluster, dict):
                 raise LLMError("Стадия A: некорректный кластер.")
             kind = str(cluster.get("kind") or "").strip().lower().rstrip("*")
-            tag = str(cluster.get("tag") or "").strip()
-            if kind not in ALLOWED_KINDS or not tag:
+            raw_tag = str(cluster.get("tag") or "").strip()
+            if kind not in ALLOWED_KINDS or not raw_tag:
                 raise LLMError("Стадия A: некорректный кластер.")
+            # Очистка тега: мусорный запрос исчезает, размеры склеиваются.
+            tag = normalize_cluster_tag(raw_tag)
+            if not tag:
+                continue
+            key = tag.casefold()
+            if key in seen:
+                continue  # дубль регистра/пробелов — уже есть
+            seen.add(key)
             normalized.append({"kind": kind, "tag": tag})
         result[n] = {
             "b2b": item.get("b2b") if item.get("b2b") in ("B2C", "B2B", "B2C+B2B") else "B2C",
@@ -234,13 +254,42 @@ _RE_SECTION_9 = re.compile(r"^##\s*9[.:]", flags=re.MULTILINE)
 _RE_HYP_HEADER = re.compile(r"^\*\*Гипотеза\s+(\d+):", flags=re.MULTILINE)
 _RE_HYP_ANY = re.compile(r"Гипотеза\s*\d+")
 _RE_HYP_LINE = re.compile(r"^\*\*Гипотеза\s+\d+:")
+# Основание из 1–2 объявлений: малая база ≠ спрос, нужен агрегат или маркер.
 _RE_SINGLETON_BASIS = re.compile(
-    r"(?<![\d.,])1\s+(?:[^\s;.,]+\s+){0,3}объявлени", flags=re.IGNORECASE
+    r"(?<![\d.,])[12]\s+(?:[^\s;.,]+\s+){0,3}объявлени", flags=re.IGNORECASE
 )
+_SINGLETON_MAX = {1.0, 2.0}
 # Темы «дефекты/б/у» в заголовке гипотезы: пометки состояния от продавцов б/у — не спрос.
 _RE_FORBIDDEN_TOPIC = re.compile(
     r"дефект|биты|битой|побит|б/у|б[- ]?у\b|бывш|уцен|царапин|потёрт|"
     r"следы эксплуатации|не новый",
+    flags=re.IGNORECASE,
+)
+# Сервис (доставка/оплата) — фильтр маркетплейса, а не сценарий потребления и не товар.
+# Банится в заголовках гипотез, если сама ниша не является услугой доставки/логистики.
+_RE_SERVICE_TOPIC = re.compile(
+    r"доставк|самовывоз|пункт[ы]? выдачи|оплат\w*|наличн\w+ расчёт",
+    flags=re.IGNORECASE,
+)
+_RE_DELIVERY_NICHE = re.compile(
+    r"доставк|курьер|логист|перевоз|экспедиц",
+    flags=re.IGNORECASE,
+)
+_RE_DIGEST_NICHE = re.compile(r"^Ниша/товар:\s*(.+)$", flags=re.MULTILINE)
+# «0 свежих» как основание гипотезы: сезонность обязана быть проверена.
+_RE_NO_FRESH_BASIS = re.compile(
+    r"(?<!\d)0\s+свежих|нет\s+свежих|без\s+свежих|отсутств\w*\s+свежих",
+    flags=re.IGNORECASE,
+)
+# Порог «просмотров/день» в критерии успеха (KPI-реализм).
+_RE_VIEWS_PER_DAY = re.compile(
+    r"(?<!\d)(\d+(?:[.,]\d+)?)\s*(?:\+\s*)?просмот\w*[\s/]*(?:в\s+)?день",
+    flags=re.IGNORECASE,
+)
+_RE_KPI_CAPS = re.compile(r"—\s*(\d+)\s*\(")
+_RE_KPI_FACT = re.compile(r"^\[реалистичные пороги\]\s*(.+)$", flags=re.MULTILINE)
+_RE_PAID_BUDGET = re.compile(
+    r"платн|бюджет|таргет|XL|витрин|поднят|продвижен",
     flags=re.IGNORECASE,
 )
 _RE_POINT = re.compile(r"^\s*(\d+)\)", flags=re.MULTILINE)
@@ -302,6 +351,19 @@ def validate_grounding(text: str, digest_text: str) -> list[str]:
     if section_8 is not None:
         body_8 = _body_after_header(text[:section_9.start()], section_8)
         headers = list(_RE_HYP_HEADER.finditer(body_8))
+
+        # Ниша из дайджеста: для ниш-услуг доставки/логистики сервис-темы легальны.
+        niche_match = _RE_DIGEST_NICHE.search(digest_text)
+        niche = niche_match.group(1).strip() if niche_match else ""
+        delivery_niche = bool(_RE_DELIVERY_NICHE.search(niche))
+
+        # Реалистичный потолок «просмотров/день» из факта «реалистичные пороги».
+        kpi_cap: float | None = None
+        kpi_fact = _RE_KPI_FACT.search(digest_text)
+        if kpi_fact:
+            caps = [float(m.group(1)) for m in _RE_KPI_CAPS.finditer(kpi_fact.group(1))]
+            kpi_cap = max(caps) if caps else None
+
         for line in body_8.splitlines():
             if _RE_HYP_ANY.search(line) and not _RE_HYP_LINE.match(line):
                 violations.append(
@@ -320,6 +382,13 @@ def validate_grounding(text: str, digest_text: str) -> list[str]:
                     "состояния ставят продавцы б/у, это не спрос; переформулируй "
                     "про спрос, цену, кластеры, сценарии или конкуренцию"
                 )
+            if not delivery_niche and _RE_SERVICE_TOPIC.search(title):
+                violations.append(
+                    f"{label}: сервис (доставка/оплата) в заголовке — это фильтр "
+                    "маркетплейса, а не сценарий потребления и не товар; гипотеза "
+                    "о предложении «с доставкой» запрещена — доставка включается "
+                    "по умолчанию, упомяни её в §6 как условие"
+                )
             if "Основание" not in block:
                 violations.append(f"{label}: нет подстроки «Основание»")
             if "Проверка" not in block:
@@ -337,16 +406,38 @@ def validate_grounding(text: str, digest_text: str) -> list[str]:
                     violations.append(
                         f"{label}: в «Критерии успеха» нет числового порога"
                     )
+                # KPI-реализм: порог просмотров/день ≤ потолка из дайджеста
+                # (2× медианы сегмента), если в «Проверке» нет бюджета на продвижение.
+                if kpi_cap is not None and not _RE_PAID_BUDGET.search(block):
+                    thresholds = [float(m.group(1).replace(",", "."))
+                                  for m in _RE_VIEWS_PER_DAY.finditer(criterion)]
+                    if thresholds and max(thresholds) > kpi_cap:
+                        violations.append(
+                            f"{label}: порог {max(thresholds):g} просмотров/день в "
+                            "«Критерии успеха» превышает реалистичный потолок "
+                            f"{kpi_cap:g} (2× медианы сегмента из дайджеста) — "
+                            "занизи порог до потолка или добавь в «Проверку» "
+                            "бюджет на платные услуги"
+                        )
             basis_at = block.find("Основание")
             if basis_at != -1:
                 check_at = block.find("Проверка", basis_at)
                 basis = block[basis_at:check_at] if check_at != -1 else block[basis_at:]
                 # Основание из единичного объявления («1 старое объявление…») —
                 # признак надуманной гипотезы: нужен агрегат или маркер.
-                if _RE_SINGLETON_BASIS.search(basis) and normalize_numbers(basis) <= {1.0}:
+                if _RE_SINGLETON_BASIS.search(basis) and normalize_numbers(basis) <= _SINGLETON_MAX:
                     violations.append(
-                        f"{label}: «Основание» опирается на единичное объявление — "
-                        f"нужен агрегат из дайджеста или маркер {HYPOTHESIS_MARKER}"
+                        f"{label}: «Основание» опирается на 1–2 объявления — "
+                        f"малая база не доказывает спрос; нужен агрегат из дайджеста "
+                        f"или маркер {HYPOTHESIS_MARKER}"
+                    )
+                # «0 свежих» = сезонность: межсезонье — закрытый сезон, не окно входа.
+                if _RE_NO_FRESH_BASIS.search(block) and "сезон" not in block.lower():
+                    violations.append(
+                        f"{label}: основание на «0 свежих» без проверки сезонности — "
+                        "для сезонного товара 0 свежих в межсезонье это закрытый сезон, "
+                        "а не окно для входа; добавь в «Основание» или «Проверку» "
+                        "оценку сезона (фаза сезона на дату парсинга)"
                     )
             if _has_marker(block):
                 continue  # маркер данных освобождает от цитаты дайджеста
@@ -366,6 +457,14 @@ def validate_grounding(text: str, digest_text: str) -> list[str]:
             "(просмотры измеряемы, конверсия в контакт/покупку — только предположение)"
         )
 
+    # Юнит-экономика: себестоимость/маржа/CAC в данных отсутствуют — §9 обязана это
+    # признать; вердикт без экономики вердикт о трафике, а не о прибыли.
+    if not re.search(r"юнит-эконом|себестоимост|марж\w*\b", body_9, flags=re.IGNORECASE):
+        violations.append(
+            "§9: нет оговорки про юнит-экономику — укажи, что себестоимость, маржа и CAC "
+            "нашими данными не измеряются [НЕТ ДАННЫХ], а вердикт — о трафике, не о прибыли"
+        )
+
     # Блок вердикта — текст до первого пункта «N)».
     verdict_block = body_9[:points[0].start()] if points else body_9
     if not verdict_block.strip().startswith("**Вердикт:"):
@@ -378,6 +477,21 @@ def validate_grounding(text: str, digest_text: str) -> list[str]:
             violations.append(
                 "п.9: вердикт не подкреплён цифрой из дайджеста и нет маркера "
                 f"«{DECISION_MARKER}»"
+            )
+        # Вердикт обязан называть целевой ценовой сегмент (позиционирование входа).
+        if not re.search(r"сегмент|дешёв|средн|дорог", verdict_block, flags=re.IGNORECASE):
+            violations.append(
+                "п.9: в вердикте не назван целевой ценовой сегмент — укажи, в какой "
+                "сегмент цены (дешёвые / средние / дорогие) ты входишь и с какой медианой "
+                "«Просмотров сегодня»"
+            )
+        # Безусловный «ВХОДИТЬ» без условий — лотерея: юнит-экономика не измерена.
+        if re.match(r"\*\*Вердикт:\*\*\s*\*{0,2}ВХОДИТЬ\b(?!\s*ПРИ)",
+                    verdict_block.strip()):
+            violations.append(
+                "п.9: безусловный «ВХОДИТЬ» недопустим — юнит-экономика (себестоимость, "
+                "маржа, CAC) нашими данными не измеряется; сформулируй «ВХОДИТЬ ПРИ "
+                "УСЛОВИИ …» с явными условиями входа либо НЕ ВХОДИТЬ"
             )
 
     bad_points = _RE_POINT_BAD.findall(body_9)

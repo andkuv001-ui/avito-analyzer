@@ -159,3 +159,35 @@ def test_digest_rules_mention_price_confounder():
     text = _digest(_classifications())
     assert "ЦЕНА — ГЛАВНЫЙ КОНФАУНДЕР" in text
     assert "только ВНУТРИ ценовых сегментов" in text
+
+
+# --- новые правила интерпретации в rules() -----------------------------------
+
+def test_digest_rules_mention_seasonality_with_month():
+    text = _digest(_classifications())
+    assert "СЕЗОННОСТЬ" in text
+    assert "месяц: октябрь" in text  # REF = 01.10.2026
+    assert "ЗАКРЫТЫЙ СЕЗОН" in text
+
+
+def test_digest_rules_mention_product_fit_and_small_base():
+    text = _digest(_classifications())
+    assert "ТОВАР КЛИЕНТА" in text
+    assert "1–2 объявления в кластере — это не доказательство спроса" in text
+
+
+def test_digest_rules_mention_service_and_kpi():
+    text = _digest(_classifications())
+    assert "СЕРВИС — НЕ СЦЕНАРИЙ" in text
+    assert "реалистичные пороги" in text
+
+
+def test_digest_rules_mention_unit_economics_and_map_cleaning():
+    text = _digest(_classifications())
+    assert "ЮНИТ-ЭКОНОМИКА" in text
+    assert "Карта спроса уже очищена кодом" in text
+
+
+def test_digest_has_realistic_thresholds_fact():
+    text = _digest(_classifications())
+    assert "[реалистичные пороги] " in text
