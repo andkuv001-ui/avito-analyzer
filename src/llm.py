@@ -359,6 +359,13 @@ def validate_grounding(text: str, digest_text: str) -> list[str]:
     body_9 = _body_after_header(text, section_9)
     points = list(_RE_POINT.finditer(body_9))
 
+    # Обязательная оговорка: просмотры — измеримый этап, дальше воронка только предполагается.
+    if "второй этап воронки" not in body_9.lower():
+        violations.append(
+            "§9: нет обязательной оговорки о воронке — нужна фраза «второй этап воронки» "
+            "(просмотры измеряемы, конверсия в контакт/покупку — только предположение)"
+        )
+
     # Блок вердикта — текст до первого пункта «N)».
     verdict_block = body_9[:points[0].start()] if points else body_9
     if not verdict_block.strip().startswith("**Вердикт:"):

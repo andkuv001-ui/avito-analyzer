@@ -24,7 +24,8 @@ def _verdict(text: str = "**Вердикт:** ВХОДИТЬ — всего 12 �
 
 def _conclusion(point7: str = "сделать X, основание 12, эффект 70.0%",
                 points_format: str = ")") -> str:
-    points = [f"{i}{points_format} пункт с цифрой 12." for i in range(1, 7)]
+    points = [f"{i}{points_format} пункт с цифрой 12, второй этап воронки."
+              for i in range(1, 7)]
     points.append(f"7{points_format} {point7}.")
     return "\n".join(points)
 
@@ -362,3 +363,24 @@ def test_used_goods_demand_title_is_violation():
 
 def test_sane_hypothesis_titles_pass():
     assert validate_grounding(_report(), DIGEST) == []
+
+
+# --- обязательная оговорка «второй этап воронки» в §9 -----------------------
+
+
+def test_missing_funnel_caveat_is_violation():
+    conclusion = "\n".join(f"{i}) пункт с цифрой 12." for i in range(1, 8))
+    violations = validate_grounding(_report(conclusion=conclusion), DIGEST)
+    assert any("второй этап воронки" in v for v in violations)
+
+
+def test_funnel_caveat_in_verdict_block_passes():
+    # оговорка стоит сразу после вердикта, до пунктов — это норма
+    conclusion = "\n".join(f"{i}) пункт с цифрой 12." for i in range(1, 8))
+    report = _report(
+        verdict="**Вердикт:** ВХОДИТЬ — медиана 12 просмотров/день.\n\n"
+                "Просмотры — второй этап воронки: конверсию в контакты "
+                "предполагаем только гипотетически.",
+        conclusion=conclusion,
+    )
+    assert validate_grounding(report, DIGEST) == []
