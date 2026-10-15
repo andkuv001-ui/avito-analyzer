@@ -237,6 +237,12 @@ _RE_HYP_LINE = re.compile(r"^\*\*Гипотеза\s+\d+:")
 _RE_SINGLETON_BASIS = re.compile(
     r"(?<![\d.,])1\s+(?:[^\s;.,]+\s+){0,3}объявлени", flags=re.IGNORECASE
 )
+# Темы «дефекты/б/у» в заголовке гипотезы: пометки состояния от продавцов б/у — не спрос.
+_RE_FORBIDDEN_TOPIC = re.compile(
+    r"дефект|биты|битой|побит|б/у|б[- ]?у\b|бывш|уцен|царапин|потёрт|"
+    r"следы эксплуатации|не новый",
+    flags=re.IGNORECASE,
+)
 _RE_POINT = re.compile(r"^\s*(\d+)\)", flags=re.MULTILINE)
 _RE_POINT_BAD = re.compile(r"^\s*(\d+)\.", flags=re.MULTILINE)
 
@@ -307,6 +313,13 @@ def validate_grounding(text: str, digest_text: str) -> list[str]:
             violations.append(f"гипотез: {count} — требуется от {MIN_HYPOTHESES} до {MAX_HYPOTHESES}")
         for header, block in zip(headers, _slice_blocks(body_8, headers)):
             label = f"гипотеза {header.group(1)}"
+            title = block.split("**", 1)[0]
+            if _RE_FORBIDDEN_TOPIC.search(title):
+                violations.append(
+                    f"{label}: тема дефектов/б/у в заголовке запрещена — пометки "
+                    "состояния ставят продавцы б/у, это не спрос; переформулируй "
+                    "про спрос, цену, кластеры, сценарии или конкуренцию"
+                )
             if "Основание" not in block:
                 violations.append(f"{label}: нет подстроки «Основание»")
             if "Проверка" not in block:

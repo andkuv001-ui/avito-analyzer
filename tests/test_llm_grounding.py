@@ -319,3 +319,46 @@ def test_singleton_pattern_not_triggered_by_double_digits():
         for i in range(1, 6)
     ])
     assert validate_grounding(report, DIGEST) == []
+
+
+# --- запрет темы дефектов/б/у в гипотезах ----------------------------------
+
+
+def test_demand_for_defects_title_is_violation():
+    hypotheses = [
+        _hypo(i, basis="всего 12 объявлений").replace(
+            "утверждение",
+            f"существует спрос на рюкзаки с дефектами {i}",
+        )
+        for i in range(1, 6)
+    ]
+    violations = validate_grounding(_report(hypotheses), DIGEST)
+    assert sum("дефектов/б/у" in v for v in violations) == 5
+
+
+def test_defects_attractive_title_is_violation():
+    hypotheses = [
+        _hypo(i, basis="всего 12 объявлений").replace(
+            "утверждение",
+            f"дефекты ткани привлекательны для покупателей {i}",
+        )
+        for i in range(1, 6)
+    ]
+    violations = validate_grounding(_report(hypotheses), DIGEST)
+    assert sum("дефектов/б/у" in v for v in violations) == 5
+
+
+def test_used_goods_demand_title_is_violation():
+    hypotheses = [
+        _hypo(i, basis="всего 12 объявлений").replace(
+            "утверждение",
+            f"спрос на б/у модели растёт {i}",
+        )
+        for i in range(1, 6)
+    ]
+    violations = validate_grounding(_report(hypotheses), DIGEST)
+    assert sum("дефектов/б/у" in v for v in violations) == 5
+
+
+def test_sane_hypothesis_titles_pass():
+    assert validate_grounding(_report(), DIGEST) == []
