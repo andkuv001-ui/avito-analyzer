@@ -1,6 +1,7 @@
 import hashlib
 import io
 from datetime import datetime, time
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -17,6 +18,7 @@ from src.sb_store import (
     StorageError,
     consume_quota,
     download_xlsx,
+    get_admin_client,
     get_quota,
     list_reports,
     save_report,
@@ -106,6 +108,18 @@ def _render_report(result: dict):
                 use_container_width=True,
             )
 
+    if result.get("saved"):
+        st.success("Сохранено в «Мои отчёты»")
+    elif st.button("Сохранить в «Мои отчёты»"):
+        report_id = _persist_report(
+            user_id, result.get("niche", ""), result.get("region", ""),
+            result["filename"], result["report"], "done",
+            result.get("warning"), file_bytes,
+        )
+        if report_id is not None:
+            result["saved"] = True
+            st.rerun()
+
 
 def _logout():
     session = sess.normalize_session(st.session_state.get("sb_session"))
@@ -187,9 +201,10 @@ def _render_auth_gate():
 
 def _persist_report(user_id: str, niche: str, region: str, file_name: str,
                     report_md: str, status: str, warning: str | None,
-                    xlsx_bytes: bytes):
+                    xlsx_bytes: bytes) -> str | None:
+    """Сохранить отчёт в историю. None — не сохранён (текст в st.error)."""
     try:
-        save_report(
+        return save_report(
             user_id=user_id,
             niche=niche,
             region=region,
@@ -202,6 +217,7 @@ def _persist_report(user_id: str, niche: str, region: str, file_name: str,
         )
     except StorageError as exc:
         st.error(f"Отчёт сформирован, но не сохранён в истории: {exc}")
+        return None
 
 
 def _render_history(user_id: str):
@@ -262,9 +278,10 @@ def _render_history(user_id: str):
             except StorageError as exc:
                 st.error(str(exc))
             else:
+                xlsx_name = (Path(file_name).stem + ".xlsx") if file_name else "upload.xlsx"
                 st.download_button(
                     "Скачать Excel", data=xlsx,
-                    file_name=file_name or "upload.xlsx",
+                    file_name=xlsx_name,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
@@ -275,6 +292,12 @@ if session is None:
     _render_auth_gate()
     st.stop()
 user_id = session["user_id"]
+
+try:
+    get_admin_client()
+except StorageError as exc:
+    st.error(str(exc))
+    st.stop()
 
 with st.sidebar:
     st.title("📊 Avito Analyzer")
@@ -457,13 +480,15 @@ if run or (result_key in results):
                 "warning": grounding_warning,
                 "niche": niche.strip(),
                 "region": region.strip(),
+                "saved": False,
             }
             progress.progress(1.0, text="Готово")
             status.empty()
-            _persist_report(
+            if _persist_report(
                 user_id, niche.strip(), region.strip(), file_name,
                 report_md, "done", grounding_warning, file_bytes,
-            )
+            ) is not None:
+                results[result_key]["saved"] = True
             _render_report(results[result_key])
 
         except LLMError as exc:
@@ -482,8 +507,16 @@ if run or (result_key in results):
         except FileNotFoundError as exc:
             progress.empty()
             status.empty()
+            _persist_report(
+                user_id, niche.strip(), region.strip(), file_name,
+                "", "failed", None, file_bytes,
+            )
             st.error(str(exc))
         except Exception as exc:
             progress.empty()
             status.empty()
+            _persist_report(
+                user_id, niche.strip(), region.strip(), file_name,
+                "", "failed", None, file_bytes,
+            )
             st.error(f"Ошибка анализа: {exc}")

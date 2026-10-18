@@ -6,11 +6,13 @@ Markdown-отчёт секций 1–9 с вердиктом. Метрики с�
 
 ## Команды
 
-- Тесты: `python -m pytest tests/` (207 проходят) — в `.venv` (`source .venv/bin/activate`)
+- Тесты: `python -m pytest tests/` (212 проходят) — в `.venv` (`source .venv/bin/activate`)
 - Локально: `streamlit run app.py` → http://localhost:8501
 - Линтера нет; стиль — PEP8, комментарии по-русски (не добавлять, если не просят)
 - Docker: `docker build -t avito-analyzer .` (проверено, контейнер healthy)
-- Деплой: Coolify из GitHub (origin `andkuv001-ui/avito-analyzer`, branch `main`), env в Coolify не менялись
+- Деплой: Coolify из GitHub (origin `andkuv001-ui/avito-analyzer`, branch `main`);
+  env в Coolify не менялись — **ручной ops-шаг pending**: заменить
+  `SUPABASE_SERVICE_ROLE_KEY` на service_role/`sb_secret_` ключ и redeploy
 
 ## Архитектура (ключевые файлы)
 
@@ -25,6 +27,35 @@ Markdown-отчёт секций 1–9 с вердиктом. Метрики с�
 - `src/digest.py` — `build_digest` + `rules(parsed_at)` (правила интерпретации с месяцем парсинга)
 - `src/report.py` — `assemble_report`, `build_demand_map_table` (карта спроса из кода)
 - `src/parse_excel.py`, `src/dates.py`, `src/session.py`, `src/sb_store.py`, `src/docx_export.py`, `src/config.py`
+
+## Состояние: усилено сохранение отчётов (403 RLS и потеря отчётов)
+
+План: `.kilo/plans/1792132606672-report-save-hardening.md`.
+
+1. **Preflight ключа**: `service_key_role`/`assert_service_key` (`src/sb_store.py`)
+   вызываются в `get_admin_client()`; anon/publishable в `SUPABASE_SERVICE_ROLE_KEY`
+   → `SupabaseMisconfiguredKey` с текстом «Замените на service_role / sb_secret_ ключ».
+   Неизвестный формат ключа не блокируется (role `None`). В `app.py` preflight сразу
+   после логина: `st.error(str(exc))` + `st.stop()` — блок до анализа вместо 403 RLS
+   в момент сохранения.
+2. **`save_report` не теряет отчёт**: upload Excel нефатален — при падении строка
+   всё равно вставляется с `file_path=null` и warning «Excel-файл не сохранён в
+   истории: …; <исходный warning>»; падение insert по-прежнему `StorageError`
+   («Не удалось сохранить отчёт…»). Путь Storage — `{user_id}/{report_id}.xlsx`
+   в bucket `reports` (без двойного префикса `reports/`, раньше ломал RLS «own files read»).
+   Старые строки со старым `file_path` качаются как прежде (путь в строке).
+3. **Повтор сохранения**: в кэше `results[result_key]` поле `saved`; при
+   `saved=False` под отчётом кнопка «Сохранить в «Мои отчёты»» (повторный
+   `_persist_report` → `saved=True` → rerun → `st.success`).
+4. **Упавшие прогоны**: ветки `except FileNotFoundError` и `except Exception`
+   тоже вызывают `_persist_report(..., "", "failed", None, file_bytes)` —
+   прогоны попадают в историю с пустым MD.
+5. **Excel в истории**: кнопка «Скачать Excel» отдаёт `stem(file_name) + ".xlsx"`,
+   а не имя `.md`.
+6. `_persist_report` возвращает `report_id | None` (None → текст в `st.error`).
+
+Вне объёма (как в плане): refresh-токены/сессии >1 ч, INSERT-политики RLS,
+миграции схемы, платёжный шлюз, ретеншн.
 
 ## Состояние: закрыты 10 критических замечаний по качеству анализа (коммит `f1eac2c`, запушен)
 

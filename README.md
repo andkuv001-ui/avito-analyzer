@@ -59,14 +59,18 @@ streamlit run app.py
    настройте свой SMTP в том же разделе).
 4. Пропишите env-переменные `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
    `SUPABASE_SERVICE_ROLE_KEY` (Settings → API) в `.env` локально и в Coolify.
+   `SUPABASE_SERVICE_ROLE_KEY` должен быть роли **service_role** (`sb_secret_…`),
+   а не anon/publishable: приложение проверяет роль ключа при старте и при
+   anon/publishable блокирует работу с понятной ошибкой («Замените на
+   service_role / sb_secret_ ключ») вместо 403 RLS в момент сохранения.
 5. **Выдача квоты**: дефолт квоты — 0 (доступ закрыт до оплаты). После оплаты откройте
    **Supabase Studio → Table Editor → profiles** и поставьте пользователю
    `quota_reports` (например, `5`); `used_reports` трогать не нужно — списание
    происходит автоматически при запуске анализа, окно 30 дней сбрасывается лениво.
 6. Регистрация открыта; оплата — вручную (счёт/перевод), платёжного шлюза нет.
 
-Файлы Excel хранятся в Storage по пути `reports/{user_id}/{report_id}.xlsx`
-(приватный bucket, чужие файлы RLS не читает).
+Файлы Excel хранятся в Storage в приватном bucket `reports` по пути
+`{user_id}/{report_id}.xlsx` (чужие файлы RLS не читает).
 
 ## Тесты
 

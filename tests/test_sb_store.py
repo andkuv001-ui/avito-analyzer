@@ -1,3 +1,6 @@
+import base64
+import json
+
 import httpx
 import pytest
 from supabase_auth.errors import AuthApiError
@@ -5,13 +8,16 @@ from supabase_auth.errors import AuthApiError
 from src import sb_store
 from src.sb_store import (
     StorageError,
+    SupabaseMisconfiguredKey,
     SupabaseNotConfigured,
+    assert_service_key,
     consume_quota,
     download_xlsx,
     get_quota,
     get_report,
     list_reports,
     save_report,
+    service_key_role,
     sign_in,
     sign_out,
     sign_up,
@@ -20,6 +26,13 @@ from src.sb_store import (
 
 USER = "11111111-1111-1111-1111-111111111111"
 OTHER = "22222222-2222-2222-2222-222222222222"
+
+
+def _jwt(role: str) -> str:
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"role": role}).encode()
+    ).decode().rstrip("=")
+    return f"header.{payload}.signature"
 
 
 # --- фейки -------------------------------------------------------------------
@@ -220,7 +233,7 @@ def test_save_report_uploads_to_owner_path_and_inserts_row():
         USER, "мох", "Москва", "openai/gpt-4o-mini", "выгрузка.xlsx",
         "# Отчёт", xlsx, "done", "warning-text", admin=admin,
     )
-    path = f"reports/{USER}/{report_id}.xlsx"
+    path = f"{USER}/{report_id}.xlsx"
     assert admin.bucket.files[path] == xlsx
     assert admin.bucket.last_options["content-type"].endswith("sheetml.sheet")
 
@@ -249,13 +262,32 @@ def test_save_report_without_xlsx_skips_upload():
     assert admin.tables["reports"][0]["id"] == report_id
 
 
-def test_save_report_network_error_is_storage_error():
+def test_save_report_upload_error_keeps_row_with_warning():
+    """Падение Excel-upload не теряет отчёт: строка есть, file_path = null."""
     admin = FakeAdmin()
     admin.bucket.error = httpx.ConnectError("boom")
+    report_id = save_report(
+        USER, "мох", "Москва", None, "a.xlsx", "# Отчёт", b"x", "done",
+        "grounding-warning", admin=admin,
+    )
+    rows = admin.tables["reports"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["id"] == report_id
+    assert row["file_path"] is None
+    assert row["report_md"] == "# Отчёт"
+    assert row["status"] == "done"
+    assert "Excel-файл не сохранён в истории" in row["warning"]
+    assert "grounding-warning" in row["warning"]
+
+
+def test_save_report_insert_error_is_storage_error():
+    admin = FakeAdmin()
+    admin.tables["error"] = RuntimeError("db down")
     with pytest.raises(StorageError) as exc:
-        save_report(USER, "мох", "Москва", None, "a.xlsx", "", b"x", "done", None,
-                    admin=admin)
-    assert "Нет связи" in str(exc.value)
+        save_report(USER, "мох", "Москва", None, "a.xlsx", "", None, "failed",
+                    None, admin=admin)
+    assert "Не удалось сохранить отчёт" in str(exc.value)
 
 
 # --- list / get / download ---------------------------------------------------
@@ -378,6 +410,53 @@ def test_sign_out_swallows_errors_and_calls_admin():
 
     auth.admin.sign_out = lambda jwt, scope="global": (_ for _ in ()).throw(RuntimeError("x"))
     sign_out("token-1", auth=auth)  # не должен raising
+
+
+# --- ключ service-role -------------------------------------------------------
+
+def test_service_key_role_formats():
+    assert service_key_role("sb_secret_abc") == "service_role"
+    assert service_key_role("sb_publishable_abc") == "anon"
+    assert service_key_role(_jwt("service_role")) == "service_role"
+    assert service_key_role(_jwt("anon")) == "anon"
+    assert service_key_role(_jwt("authenticated")) == "authenticated"
+    assert service_key_role("не-jwt-ключ") is None
+    assert service_key_role("a.b") is None
+    assert service_key_role("a.!!!.c") is None
+
+
+def test_assert_service_key_allows_service_role_and_unknown_formats():
+    assert_service_key("sb_secret_abc")
+    assert_service_key(_jwt("service_role"))
+    assert_service_key("service")  # формат из тестов/будущих ключей — не блок
+    assert_service_key("мусор-вместо-ключа")
+
+
+def test_assert_service_key_blocks_anon_publishable():
+    with pytest.raises(SupabaseMisconfiguredKey) as exc:
+        assert_service_key("sb_publishable_abc")
+    assert "service_role" in str(exc.value)
+    assert "Supabase Studio" in str(exc.value)
+
+    with pytest.raises(SupabaseMisconfiguredKey):
+        assert_service_key(_jwt("anon"))
+
+    with pytest.raises(SupabaseMisconfiguredKey):
+        assert_service_key(_jwt("authenticated"))
+
+
+def test_get_admin_client_blocks_publishable_key(monkeypatch):
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "sb_publishable_leak")
+    sb_store.reset_clients()
+    try:
+        with pytest.raises(SupabaseMisconfiguredKey):
+            sb_store.get_admin_client()
+        assert sb_store._admin_cache == {}  # кэш не заполнен, повтор тоже блок
+    finally:
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        sb_store.reset_clients()
 
 
 # --- конфигурация ------------------------------------------------------------

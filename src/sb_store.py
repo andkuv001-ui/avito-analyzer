@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import uuid
 
@@ -23,6 +25,10 @@ class StorageError(Exception):
 
 class SupabaseNotConfigured(StorageError):
     """Не заданы переменные окружения Supabase."""
+
+
+class SupabaseMisconfiguredKey(StorageError):
+    """В SUPABASE_SERVICE_ROLE_KEY лежит ключ не той роли (anon/authenticated)."""
 
 
 _NETWORK_TYPE_NAMES = {
@@ -48,6 +54,47 @@ def get_settings() -> tuple[str, str, str]:
     return url, anon, service
 
 
+def service_key_role(key: str) -> str | None:
+    """Роль ключа Supabase: "service_role"/"anon"/"authenticated" или None.
+
+    Новые форматы ключей (`sb_secret_`, `sb_publishable_`) распознаются по
+    префиксу, старые — JWT с claim `role` в payload. Не разбирается → None:
+    неизвестный формат не блокируем.
+    """
+    key = key.strip()
+    if key.startswith("sb_secret_"):
+        return "service_role"
+    if key.startswith("sb_publishable_"):
+        return "anon"
+    parts = key.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        payload = parts[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+        role = claims.get("role")
+    except Exception:
+        return None
+    return role if isinstance(role, str) else None
+
+
+def assert_service_key(key: str) -> None:
+    """Блокировка anon/authenticated ключа в SUPABASE_SERVICE_ROLE_KEY.
+
+    Префикс `sb_publishable_` даёт role "anon" в `service_key_role`.
+    """
+    role = service_key_role(key)
+    if role not in ("anon", "authenticated"):
+        return
+    detail = "anon (publishable)" if role == "anon" else role
+    raise SupabaseMisconfiguredKey(
+        f"SUPABASE_SERVICE_ROLE_KEY содержит ключ роли {detail}. "
+        "Замените на service_role / sb_secret_ ключ: "
+        "Supabase Studio → Settings → API."
+    )
+
+
 _auth_cache: dict = {}
 _admin_cache: dict = {}
 
@@ -66,6 +113,7 @@ def get_admin_client():
         from supabase import create_client
 
         url, _, service = get_settings()
+        assert_service_key(service)
         _admin_cache["client"] = create_client(url, service)
     return _admin_cache["client"]
 
@@ -209,18 +257,21 @@ def save_report(user_id: str, niche: str, region: str, model: str | None,
                 status: str, warning: str | None, admin=None) -> str:
     """Upload Excel в Storage + insert метаданных/Markdown в reports.
 
-    report_id генерируется заранее: путь в Storage — `reports/{user}/{id}.xlsx`.
+    report_id генерируется заранее: путь в Storage — `{user}/{id}.xlsx` (bucket
+    `reports`). Upload Excel нефатален: при его падении строка всё равно
+    сохраняется с `file_path = null` и warning — отчёт не теряется.
     """
     admin = _resolve(admin, get_admin_client)
     report_id = str(uuid.uuid4())
-    file_path = f"{BUCKET}/{user_id}/{report_id}.xlsx"
+    file_path = f"{user_id}/{report_id}.xlsx"
+    upload_warning = None
     if xlsx_bytes:
         try:
             admin.storage.from_(BUCKET).upload(
                 file_path, xlsx_bytes, {"content-type": XLSX_CONTENT_TYPE}
             )
         except Exception as exc:
-            raise _friendly(exc, "Не удалось сохранить Excel-файл") from exc
+            upload_warning = f"Excel-файл не сохранён в истории: {exc}"
     row = {
         "id": report_id,
         "user_id": user_id,
@@ -228,9 +279,9 @@ def save_report(user_id: str, niche: str, region: str, model: str | None,
         "region": region,
         "model": model,
         "file_name": file_name,
-        "file_path": file_path if xlsx_bytes else None,
+        "file_path": file_path if (xlsx_bytes and upload_warning is None) else None,
         "status": status,
-        "warning": warning,
+        "warning": "; ".join(part for part in (upload_warning, warning) if part) or None,
         "report_md": report_md,
     }
     try:
