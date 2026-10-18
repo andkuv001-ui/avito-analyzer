@@ -16,6 +16,7 @@ from src.sb_store import (
     get_quota,
     get_report,
     list_reports,
+    refresh_access_token,
     save_report,
     service_key_role,
     sign_in,
@@ -168,6 +169,8 @@ class FakeAuth:
         self.sign_in_error = None
         self.get_user_error = None
         self.get_user_response = None
+        self.refresh_error = None
+        self.refresh_response = None
         self.sign_out_calls = []
 
     def sign_up(self, credentials):
@@ -187,6 +190,11 @@ class FakeAuth:
         if self.get_user_error is not None:
             raise self.get_user_error
         return self.get_user_response
+
+    def refresh_session(self, refresh_token):
+        if self.refresh_error is not None:
+            raise self.refresh_error
+        return self.refresh_response
 
 
 # --- квоты -------------------------------------------------------------------
@@ -401,6 +409,42 @@ def test_verify_token_network_error_raises_storage_error():
     auth.get_user_error = httpx.ConnectError("boom")
     with pytest.raises(StorageError):
         verify_token("good", auth=auth)
+
+
+# --- refresh-токен ------------------------------------------------------------
+
+def test_refresh_access_token_returns_new_pair():
+    auth = FakeAuth()
+    session = type("Session", (), {
+        "access_token": "t2", "refresh_token": "r2", "expires_at": 1792360000,
+    })()
+    auth.refresh_response = type("AuthResponse", (), {"session": session})()
+    assert refresh_access_token("r1", auth=auth) == {
+        "access_token": "t2",
+        "refresh_token": "r2",
+        "expires_at": 1792360000,
+    }
+
+
+def test_refresh_access_token_invalid_refresh_returns_none():
+    auth = FakeAuth()
+    auth.refresh_error = AuthApiError("Invalid Refresh Token", status=400,
+                                       code="refresh_token_not_found")
+    assert refresh_access_token("r1", auth=auth) is None
+
+
+def test_refresh_access_token_without_session_returns_none():
+    auth = FakeAuth()
+    auth.refresh_response = type("Resp", (), {"session": None})()
+    assert refresh_access_token("r1", auth=auth) is None
+
+
+def test_refresh_access_token_network_error_is_storage_error():
+    auth = FakeAuth()
+    auth.refresh_error = httpx.ConnectError("boom")
+    with pytest.raises(StorageError) as exc:
+        refresh_access_token("r1", auth=auth)
+    assert "Нет связи" in str(exc.value)
 
 
 def test_sign_out_swallows_errors_and_calls_admin():

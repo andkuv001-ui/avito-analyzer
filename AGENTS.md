@@ -6,7 +6,7 @@ Markdown-отчёт секций 1–9 с вердиктом. Метрики с�
 
 ## Команды
 
-- Тесты: `python -m pytest tests/` (212 проходят) — в `.venv` (`source .venv/bin/activate`)
+- Тесты: `python -m pytest tests/` (221 проходят) — в `.venv` (`source .venv/bin/activate`)
 - Локально: `streamlit run app.py` → http://localhost:8501
 - Линтера нет; стиль — PEP8, комментарии по-русски (не добавлять, если не просят)
 - Docker: `docker build -t avito-analyzer .` (проверено, контейнер healthy)
@@ -56,6 +56,27 @@ Markdown-отчёт секций 1–9 с вердиктом. Метрики с�
 
 Вне объёма (как в плане): refresh-токены/сессии >1 ч, INSERT-политики RLS,
 миграции схемы, платёжный шлюз, ретеншн.
+
+## Состояние: сессии живут дольше часа (refresh-токены)
+
+План: `.kilo/plans/1792354590218-session-refresh.md` — закрывает «вне объёма»
+предыдущего пункта (refresh-токены/сессии >1 ч).
+
+1. Вход сохраняет `refresh_token`/`expires_at` в `sb_session` (`app.py`,
+   `_render_auth_gate`).
+2. `_current_session` перед `verify_token`: если `sess.token_expired(session)`
+   (запас 60 с; срок из `expires_at`, fallback — `exp` из payload JWT без
+   верификации) → `refresh_access_token` (`src/sb_store.py`) → новая пара токенов
+   в session_state. `AuthApiError`/нет session → разлогин; сетевая ошибка →
+   `st.error`, **сессия сохраняется** (повтор на следующем реране).
+3. Чистые хелперы в `src/session.py`: `normalize_session` (+`refresh_token`,
+   `expires_at`), `token_expired(raw, now, skew)` — тестируются без Streamlit.
+4. Старые сессии без `refresh_token` — как раньше (разлогин в конце часа).
+5. Известное ограничение: refresh ротируется — вторая вкладка после обновления
+   в первой может разлогиниться (принято; мульти-вкладки вне объёма).
+
+Тесты: `tests/test_app_auth_flow.py` (normalize/`token_expired`), `tests/test_sb_store.py`
+(`refresh_access_token`: ок, AuthApiError → None, без session → None, сеть → StorageError).
 
 ## Состояние: закрыты 10 критических замечаний по качеству анализа (коммит `f1eac2c`, запушен)
 

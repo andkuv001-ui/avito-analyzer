@@ -1,14 +1,37 @@
+import base64
+import json
 from datetime import datetime
 
 from src import session as sess
 from src.sb_store import QUOTA_EXCEEDED_MESSAGE
 
 
+def _jwt_with_exp(exp: int) -> str:
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"exp": exp}).encode()
+    ).decode().rstrip("=")
+    return f"header.{payload}.signature"
+
+
 def test_normalize_session_valid():
     raw = {"access_token": "tok", "user_id": "u1", "email": "a@b.c"}
     assert sess.normalize_session(raw) == {
-        "access_token": "tok", "user_id": "u1", "email": "a@b.c",
+        "access_token": "tok", "refresh_token": "", "expires_at": None,
+        "user_id": "u1", "email": "a@b.c",
     }
+
+
+def test_normalize_session_keeps_refresh_token_and_expiry():
+    raw = {"access_token": "tok", "refresh_token": "ref", "expires_at": 1792360000,
+           "user_id": "u1", "email": "a@b.c"}
+    normalized = sess.normalize_session(raw)
+    assert normalized["refresh_token"] == "ref"
+    assert normalized["expires_at"] == 1792360000
+
+
+def test_normalize_session_bad_expiry_becomes_none():
+    raw = {"access_token": "tok", "user_id": "u1", "expires_at": "не-число"}
+    assert sess.normalize_session(raw)["expires_at"] is None
 
 
 def test_normalize_session_rejects_partial_and_junk():
@@ -23,6 +46,26 @@ def test_normalize_session_rejects_partial_and_junk():
 def test_normalize_session_fills_missing_email():
     session = sess.normalize_session({"access_token": "tok", "user_id": "u1"})
     assert session["email"] == ""
+
+
+def test_token_expired_uses_expires_at_with_skew():
+    raw = {"access_token": "tok", "expires_at": 1000}
+    assert sess.token_expired(raw, now=941, skew=60) is True   # на границе
+    assert sess.token_expired(raw, now=939, skew=60) is False  # ещё живой
+    assert sess.token_expired(raw, now=1100, skew=60) is True  # протух
+
+
+def test_token_expired_falls_back_to_jwt_exp():
+    raw = {"access_token": _jwt_with_exp(5000), "expires_at": None}
+    assert sess.token_expired(raw, now=4941, skew=60) is True
+    assert sess.token_expired(raw, now=4900, skew=60) is False
+
+
+def test_token_expired_no_usable_expiry_is_false():
+    assert sess.token_expired({"access_token": "tok"}) is False
+    assert sess.token_expired({"access_token": "не-jwt"}) is False
+    assert sess.token_expired({"access_token": "a.b.c"}) is False  # битый payload
+    assert sess.token_expired({"access_token": "tok", "expires_at": 0}) is False
 
 
 def test_format_quota():

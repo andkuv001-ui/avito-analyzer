@@ -210,6 +210,36 @@ def verify_token(access_token: str, auth=None) -> object | None:
     return user or None
 
 
+def refresh_access_token(refresh_token: str, auth=None) -> dict | None:
+    """Обновить пару токенов по refresh-токену.
+
+    Возвращает {"access_token", "refresh_token", "expires_at"} — новая сессия.
+    None — refresh-токен невалиден/отозван (клиент разлогинивается).
+    Сетевые/прочие ошибки — StorageError (сессию не теряем, повтор позже).
+    """
+    auth = _resolve(auth, get_auth_client)
+    try:
+        response = auth.refresh_session(refresh_token)
+    except Exception as exc:
+        from supabase_auth.errors import AuthApiError
+
+        if isinstance(exc, AuthApiError):
+            return None
+        raise _friendly(exc, "Не удалось обновить сессию") from exc
+    session = getattr(response, "session", None)
+    if session is None:
+        return None
+    try:
+        expires_at = int(getattr(session, "expires_at", 0) or 0) or None
+    except (TypeError, ValueError):
+        expires_at = None
+    return {
+        "access_token": str(getattr(session, "access_token", "") or ""),
+        "refresh_token": str(getattr(session, "refresh_token", "") or ""),
+        "expires_at": expires_at,
+    }
+
+
 def sign_out(access_token: str, auth=None) -> None:
     """Отзыв refresh-токенов на сервере. Ошибка не мешает выйти локально."""
     auth = _resolve(auth, get_auth_client)

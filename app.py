@@ -21,6 +21,7 @@ from src.sb_store import (
     get_admin_client,
     get_quota,
     list_reports,
+    refresh_access_token,
     save_report,
     sign_in,
     sign_out,
@@ -132,11 +133,28 @@ def _logout():
 
 
 def _current_session() -> dict | None:
-    """Проверка токена при каждом запуске скрипта; невалиден → выход."""
+    """Проверка токена при каждом запуске скрипта; невалиден → выход.
+
+    Перед проверкой — обновление сессии по refresh-токену, если access-token
+    истекает: иначе GoTrue выкидывает из аккаунта каждый час.
+    """
     session = sess.normalize_session(st.session_state.get("sb_session"))
     if session is None:
         st.session_state.pop("sb_session", None)
         return None
+    if session.get("refresh_token") and sess.token_expired(session):
+        try:
+            refreshed = refresh_access_token(session["refresh_token"])
+        except StorageError as exc:
+            st.error(str(exc))
+            if st.button("Выйти"):
+                _logout()
+            st.stop()
+        if refreshed is None:
+            st.session_state.pop("sb_session", None)
+            return None
+        session.update(refreshed)
+        st.session_state["sb_session"] = session
     try:
         user = verify_token(session["access_token"])
     except StorageError as exc:
@@ -169,6 +187,8 @@ def _render_auth_gate():
             else:
                 st.session_state["sb_session"] = {
                     "access_token": sb_session.access_token,
+                    "refresh_token": getattr(sb_session, "refresh_token", "") or "",
+                    "expires_at": int(getattr(sb_session, "expires_at", 0) or 0) or None,
                     "user_id": user.id,
                     "email": user.email,
                 }
