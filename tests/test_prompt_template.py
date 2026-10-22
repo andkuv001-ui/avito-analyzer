@@ -15,6 +15,15 @@ def test_prompt_seasonality_rules():
     assert "закрытый сезон" in PROMPT
     # сезонность обязана упоминаться в §1, §4 и в гипотезах
     assert "проверь сезонность" in PROMPT
+    # сезонность — внешняя календарная оценка, а не цифра данных
+    assert "вне данных" in PROMPT
+
+
+def test_prompt_single_day_slice_rule():
+    # выгрузка — один срез: цифры = уровень на момент парсинга, динамики нет
+    assert "СРЕЗ — ОДНА ДАТА" in PROMPT
+    assert "динамик" in PROMPT
+    assert "тренд" in PROMPT
 
 
 def test_prompt_product_fit_rule():

@@ -292,6 +292,22 @@ _RE_PAID_BUDGET = re.compile(
     r"платн|бюджет|таргет|XL|витрин|поднят|продвижен",
     flags=re.IGNORECASE,
 )
+# Динамика/тренд из одного среза недоказуема: запрет в «Основании» гипотез и в §9.
+_RE_DYNAMICS = re.compile(
+    r"тренд|динамик\w*|"
+    r"наблюд\w*\s+(?:рост|снижен|подъ[её]м|падени)|"
+    r"(?:рост|снижен\w*|подъ[её]м|падени\w*)\s+(?:спроса|продаж|просмотров|выдачи|аудитории)|"
+    r"(?:спрос|продажи|просмотры|выдача|аудитория)\s+"
+    r"(?:раст[её]т|рос\b|падает|снижается|увеличивается)|"
+    r"сезон(?:ный|ая|ые)\s+(?:подъ[её]м|рост|падение)",
+    flags=re.IGNORECASE,
+)
+# Честная оговорка о неизмеримости динамики одним срезом — утверждение не нарушение.
+_RE_DYNAMICS_OK = re.compile(
+    r"не измеря|нет данных|вне данных|не показывает|не доказу|невозмож|один срез|"
+    r"одна дата|временного ряда|нельзя утвержд",
+    flags=re.IGNORECASE,
+)
 _RE_POINT = re.compile(r"^\s*(\d+)\)", flags=re.MULTILINE)
 _RE_POINT_BAD = re.compile(r"^\s*(\d+)\.", flags=re.MULTILINE)
 
@@ -420,6 +436,7 @@ def validate_grounding(text: str, digest_text: str) -> list[str]:
                             "бюджет на платные услуги"
                         )
             basis_at = block.find("Основание")
+            basis = ""
             if basis_at != -1:
                 check_at = block.find("Проверка", basis_at)
                 basis = block[basis_at:check_at] if check_at != -1 else block[basis_at:]
@@ -439,6 +456,17 @@ def validate_grounding(text: str, digest_text: str) -> list[str]:
                         "а не окно для входа; добавь в «Основание» или «Проверку» "
                         "оценку сезона (фаза сезона на дату парсинга)"
                     )
+            # Динамика/тренд из одного среза: в заголовке и «Основании» — только
+            # уровень/структура на момент парсинга; сезон — календарная оценка «вне данных».
+            claim = f"{title} {basis}"
+            dynamics = _RE_DYNAMICS.search(claim)
+            if dynamics and not _RE_DYNAMICS_OK.search(claim):
+                violations.append(
+                    f"{label}: «{dynamics.group(0)}» — вывод о динамике из одного среза "
+                    "недоказуем: выгрузка снята в один момент, цифры показывают уровень "
+                    "на момент парсинга; убери вывод о росте/падении либо поставь "
+                    "[НЕТ ДАННЫХ]"
+                )
             if _has_marker(block):
                 continue  # маркер данных освобождает от цитаты дайджеста
             tokens = normalize_numbers(block)
@@ -449,6 +477,19 @@ def validate_grounding(text: str, digest_text: str) -> list[str]:
 
     body_9 = _body_after_header(text, section_9)
     points = list(_RE_POINT.finditer(body_9))
+
+    # Динамика из одного среза: §9 (вердикт, оговорки, п.1–6 — состояние рынка);
+    # п.7 не проверяем — там действия и цели теста на будущее, а не утверждения о данных.
+    dynamics_scope = body_9[:points[6].start()] if len(points) >= 7 else body_9
+    for line in dynamics_scope.splitlines():
+        match = _RE_DYNAMICS.search(line)
+        if match and not _RE_DYNAMICS_OK.search(line):
+            violations.append(
+                f"§9: «{match.group(0)}» — вывод о динамике из одного среза недоказуем: "
+                "выгрузка снята в один момент, цифры показывают уровень на момент "
+                "парсинга; убери вывод о росте/падении либо поставь [НЕТ ДАННЫХ]"
+            )
+            break
 
     # Обязательная оговорка: просмотры — измеримый этап, дальше воронка только предполагается.
     if "второй этап воронки" not in body_9.lower():

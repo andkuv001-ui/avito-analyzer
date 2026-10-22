@@ -421,6 +421,64 @@ def test_no_fresh_basis_with_season_passes():
     assert validate_grounding(report, DIGEST) == []
 
 
+# --- срез «одна дата»: динамика/тренды из данных запрещены ---------------------
+
+
+def test_dynamics_in_basis_is_violation():
+    report = _report([
+        _hypo(i, basis="спрос растёт, всего 12 объявлений")
+        for i in range(1, 6)
+    ])
+    violations = validate_grounding(report, DIGEST)
+    assert sum("вывод о динамике" in v for v in violations) == 5
+
+
+def test_dynamics_in_title_is_violation():
+    hypotheses = [
+        _hypo(i).replace("утверждение", f"тренд на бюджетные модели {i}")
+        for i in range(1, 6)
+    ]
+    violations = validate_grounding(_report(hypotheses), DIGEST)
+    assert sum("вывод о динамике" in v for v in violations) == 5
+
+
+def test_growth_claims_in_section_9_are_violations():
+    points = [
+        "1) пункт с цифрой 12, второй этап воронки.",
+        "2) пункт с цифрой 12, второй этап воронки.",
+        "3) спрос растёт, цифра 12, второй этап воронки.",
+        "4) пункт с цифрой 12, второй этап воронки.",
+        "5) пункт с цифрой 12, второй этап воронки.",
+        "6) пункт с цифрой 12, второй этап воронки.",
+        "7) сделать X, основание 12, эффект 70.0%.",
+    ]
+    violations = validate_grounding(_report(conclusion="\n".join(points)), DIGEST)
+    assert sum("§9:" in v and "динамик" in v for v in violations) == 1
+
+
+def test_dynamics_with_no_data_caveat_passes():
+    report = _report([
+        _hypo(i, basis="динамика [НЕТ ДАННЫХ] — один срез, всего 12 объявлений")
+        for i in range(1, 6)
+    ])
+    assert validate_grounding(report, DIGEST) == []
+
+
+def test_dynamics_word_in_verification_passes():
+    report = _report([
+        _hypo(i, check="мониторинг динамики спроса 14 дней")
+        for i in range(1, 6)
+    ])
+    assert validate_grounding(report, DIGEST) == []
+
+
+def test_growth_target_in_point_7_passes():
+    # п.7 — цели теста на будущее, а не утверждения о данных среза
+    points = [f"{i}) пункт с цифрой 12, второй этап воронки." for i in range(1, 7)]
+    points.append("7) тест, основание 12, эффект: рост продаж до 3 за 14 дней.")
+    assert validate_grounding(_report(conclusion="\n".join(points)), DIGEST) == []
+
+
 # --- сервис (доставка/оплата) не может быть гипотезой входа ------------------
 
 def test_delivery_hypothesis_title_is_violation():

@@ -168,6 +168,14 @@ def test_digest_rules_mention_seasonality_with_month():
     assert "СЕЗОННОСТЬ" in text
     assert "месяц: октябрь" in text  # REF = 01.10.2026
     assert "ЗАКРЫТЫЙ СЕЗОН" in text
+    # сезонность — внешняя календарная оценка, а не факт из таблицы
+    assert "вне данных" in text
+
+
+def test_digest_rules_single_day_slice():
+    text = _digest(_classifications())
+    assert "СРЕЗ — ОДНА ДАТА" in text
+    assert "динамик" in text
 
 
 def test_digest_rules_mention_product_fit_and_small_base():
